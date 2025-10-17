@@ -1,71 +1,112 @@
 # PlayerController.gd
 # Godot 4.4 / GDScript
-# 우주선(전투기) 플레이어 컨트롤러
-# - Godot4 기본 노드로 파츠를 조합해 전투기 실루엣 구성 (Polygon2D 여러 개)
-# - 점프 시 엔진 불꽃 GPUParticles2D (이전 파티클 로직 그대로)
-# - 중력/점프/바닥 충돌, 기수(피치) 기울기 연출
+# ▶ 기존 “파란 우주선”의 모든 동작(중력/점프, 스웨이, 피치, 엔진 불꽃, 충돌 API)을 그대로 유지하면서
+# ▶ "모습"만 사용자 에셋(Texture2D)으로 교체하는 버전 (씬 필요 없음 / 코드로 로드)
+#
+# 사용법:
+# 1) ship_image_path 에 프로젝트 내 경로(res://...)를 넣으면 그 텍스처를 씁니다.
+# 2) 텍스처를 못 찾으면 이전처럼 폴리곤 전투기(파란 배)로 자동 폴백합니다.
+# 3) GameLayer에서는 이전과 동일한 API로 사용 가능:
+#    setup(ground_y, size, color, start_x), update_player(delta), jump(),
+#    is_on_floor(), get_player_rect(), get_player_center(), set_gravity(), set_jump_force()
 
 extends Control
 
+# --- 물리 ---
 @export var gravity: float = 900.0
 @export var jump_force: float = -500.0
 
-@export var ship_size: Vector2 = Vector2(48, 48)             # 전체 외곽 박스
-@export var body_color: Color = Color(0.3, 0.8, 1.0)          # 동체 기본색
-@export var wing_color: Color = Color(0.25, 0.9, 1.0)         # 날개 강조색
-@export var tail_color: Color = Color(0.2, 0.6, 0.9)          # 꼬리/보조익
-@export var cockpit_color: Color = Color(0.1, 0.3, 0.6, 0.85) # 캐노피(반투명)
+# --- 스킨(에셋) ---
+@export var ship_image_path: String = "res://assets/ship_blue.png"     # 예: "res://assets/ships/ship_blue.png"
+@export var ship_scale: float = 0.15         # 요청: 1/4 크기
+# 폴백(폴리곤)용 색
+@export var body_color: Color = Color(0.3, 0.8, 1.0)
+@export var wing_color: Color = Color(0.25, 0.9, 1.0)
+@export var tail_color: Color = Color(0.2, 0.6, 0.9)
+@export var cockpit_color: Color = Color(0.1, 0.3, 0.6, 0.85)
 
-# 엔진 불꽃 색
+# --- 연출(그대로 유지) ---
+@export var pitch_up_rad: float = -0.28      # 상승 시 기수 위로
+@export var pitch_down_rad: float = 0.35     # 하강 시 기수 아래로
+@export var sway_amplitude: float = 10.0     # 좌우 흔들림 픽셀
+@export var sway_speed: float = 2.2          # 흔들림 속도(라디안/초)
+
+# --- 엔진 불꽃(그대로 유지) ---
 @export var flame_head: Color = Color(1, 0.7, 0.3, 0.95)
 @export var flame_tail: Color = Color(0.2, 0.2, 0.2, 0.0)
 
-# 기체 피치(기울기) 한계
-@export var pitch_up_rad: float = -0.28    # 상승 시 위로 들림(음수)
-@export var pitch_down_rad: float = 0.35   # 하강 시 아래로 숙임(양수)
-
+# --- 내부 상태 ---
 var _ground_y: float = 0.0
 var _vel_y: float = 0.0
 var _is_jumping: bool = false
+var _ship_size: Vector2 = Vector2(44, 44)
 
-# 비주얼 파츠
+# 스웨이용
+var _base_x: float = 0.0
+var _time: float = 0.0
+
+# --- 비주얼 노드 ---
+var _sprite: Sprite2D
+# 폴백 폴리곤
 var _fuselage: Polygon2D
-var _wing_left: Polygon2D
-var _wing_right: Polygon2D
+var _wing_l: Polygon2D
+var _wing_r: Polygon2D
 var _tail: Polygon2D
 var _canopy: Polygon2D
-
 # 엔진 불꽃
 var _flame: GPUParticles2D
 
 func _ready() -> void:
-	# 이 노드의 회전 중심을 기체 중앙으로(위치는 '좌상단' 기준이지만 회전은 중앙 기준)
-	pivot_offset = ship_size * 0.5
+	# 회전 중심을 중앙으로
+	pivot_offset = _ship_size * 0.5
+	set_process(true)
 
+# GameLayer에서 호출 — 기존 시그니처 그대로
+# size: 폴백(폴리곤)일 때만 사용, 텍스처가 있으면 텍스처 크기 기반으로 자동 결정
+# color: 폴백 동체 색 (스프라이트 사용 시 무시)
 func setup(ground_y: float, size: Vector2, color: Color, start_x: float) -> void:
-	# 외부 API는 이전 파일과 호환: size/color는 본체 색으로 사용
-	_ground_y = ground_y
-	vel_reset()
-	ship_size = size
-	body_color = color
-	pivot_offset = ship_size * 0.5
+	_clear_visuals()
 
-	_build_ship_polygons()
+	_ground_y = ground_y
+	_vel_y = 0.0
+	_is_jumping = false
+
+	var tex: Texture2D = null
+	if ship_image_path.strip_edges() != "":
+		var loaded = load(ship_image_path)
+		if loaded is Texture2D:
+			tex = loaded
+
+	if tex != null:
+		_build_sprite(tex)
+	else:
+		_build_polygon_ship(size, color)
+
 	_build_engine_flame()
 
-	# 시작 위치(좌상단 기준), 지면 위에 놓기
-	position = Vector2(start_x, _ground_y - ship_size.y)
+	# 시작 위치 및 스웨이 기준
+	_base_x = start_x
+	position = Vector2(_base_x, _ground_y - _ship_size.y)
+	pivot_offset = _ship_size * 0.5
+	_time = 0.0
 
 func update_player(delta: float) -> void:
+	# 중력/점프
 	_vel_y += gravity * delta
 	position.y += _vel_y * delta
 
-	# 간단 피치(속도 기반 기울기)
-	var t: float = clamp(_vel_y / 650.0, -1.0, 1.0)  # -1..1
+	# 좌우 스웨이(그대로 유지)
+	_time += delta
+	var sway: float = sin(_time * sway_speed) * sway_amplitude
+	position.x = _base_x + sway
+
+	# 속도 기반 피치(그대로 유지)
+	var t: float = clamp(_vel_y / 650.0, -1.0, 1.0)
 	var pitch: float = lerp(pitch_up_rad, pitch_down_rad, (t + 1.0) * 0.5)
 	rotation = pitch
 
-	var floor_y: float = _ground_y - ship_size.y
+	# 바닥 충돌
+	var floor_y: float = _ground_y - _ship_size.y
 	if position.y >= floor_y:
 		position.y = floor_y
 		_vel_y = 0.0
@@ -80,17 +121,16 @@ func jump() -> void:
 		if _flame:
 			_flame.emitting = true
 
+# ---------- GameLayer와의 충돌 API (그대로) ----------
 func is_on_floor() -> bool:
-	return position.y >= (_ground_y - ship_size.y) and _vel_y == 0.0
+	return position.y >= (_ground_y - _ship_size.y) and _vel_y == 0.0
 
 func get_player_rect() -> Rect2:
-	# 좌상단 기준의 외곽 박스 반환 (기존 GameLayer와 호환)
-	return Rect2(Vector2(position.x - ship_size.x * 0.5 + ship_size.x * 0.5, position.y), ship_size)
-	# ↑ 위 라인은 사실상 Rect2(Vector2(position.x, position.y), ship_size)와 동일.
-	# (과거 호환을 위해 수식만 유지)
+	# 좌상단 기준 외곽 박스 — GameLayer 충돌 로직과 호환
+	return Rect2(position, _ship_size)
 
 func get_player_center() -> Vector2:
-	return position + ship_size * 0.5
+	return position + _ship_size * 0.5
 
 func set_gravity(v: float) -> void:
 	gravity = v
@@ -99,84 +139,94 @@ func set_jump_force(v: float) -> void:
 	jump_force = v
 
 # ---------------- 내부 구현 ----------------
-func vel_reset() -> void:
-	_vel_y = 0.0
-	_is_jumping = false
-
-func _clear_old_parts() -> void:
-	var children = get_children()
-	for c in children:
-		if c is Polygon2D or c is GPUParticles2D:
+func _clear_visuals() -> void:
+	for c in get_children():
+		if c is Sprite2D or c is Polygon2D or c is GPUParticles2D:
 			c.queue_free()
+	_sprite = null
+	_fuselage = null
+	_wing_l = null
+	_wing_r = null
+	_tail = null
+	_canopy = null
+	_flame = null
 
-func _build_ship_polygons() -> void:
-	_clear_old_parts()
+func _build_sprite(tex: Texture2D) -> void:
+	_sprite = Sprite2D.new()
+	_sprite.texture = tex
+	_sprite.centered = false
+	_sprite.position = Vector2(0, -10)
+	_sprite.scale = Vector2(ship_scale, ship_scale)
+	_sprite.rotate(0.15)
+	add_child(_sprite)
 
-	# 좌표계: 이 노드의 좌상단(0,0) ~ (w,h)
-	var w: float = ship_size.x
-	var h: float = ship_size.y
+	_ship_size = tex.get_size() * ship_scale
+
+func _build_polygon_ship(size: Vector2, color: Color) -> void:
+	# 텍스처가 없을 때 — 기존 파란 전투기 실루엣(동작 동일)
+	_ship_size = size
+	body_color = color
+
+	var w: float = _ship_size.x
+	var h: float = _ship_size.y
 	var cx: float = w * 0.5
 
-	# --- 동체(Fuselage): 뾰족한 기수 + 하부
 	_fuselage = Polygon2D.new()
 	_fuselage.color = body_color
 	_fuselage.polygon = PackedVector2Array([
-		Vector2(cx, 0),                # 기수
+		Vector2(cx, 0),
 		Vector2(cx - w * 0.12, h * 0.22),
 		Vector2(cx - w * 0.16, h * 0.55),
-		Vector2(cx - w * 0.10, h),     # 좌측 하부
-		Vector2(cx + w * 0.10, h),     # 우측 하부
+		Vector2(cx - w * 0.10, h),
+		Vector2(cx + w * 0.10, h),
 		Vector2(cx + w * 0.16, h * 0.55),
 		Vector2(cx + w * 0.12, h * 0.22),
 	])
 	add_child(_fuselage)
 
-	# --- 좌/우 주익(Wings)
-	_wing_left = Polygon2D.new()
-	_wing_left.color = wing_color
-	_wing_left.polygon = PackedVector2Array([
+	_wing_l = Polygon2D.new()
+	_wing_l.color = wing_color
+	_wing_l.polygon = PackedVector2Array([
 		Vector2(cx - w * 0.10, h * 0.45),
 		Vector2(cx - w * 0.50, h * 0.55),
 		Vector2(cx - w * 0.22, h * 0.60),
 		Vector2(cx - w * 0.12, h * 0.53),
 	])
-	add_child(_wing_left)
+	add_child(_wing_l)
 
-	_wing_right = Polygon2D.new()
-	_wing_right.color = wing_color
-	_wing_right.polygon = PackedVector2Array([
+	_wing_r = Polygon2D.new()
+	_wing_r.color = wing_color
+	_wing_r.polygon = PackedVector2Array([
 		Vector2(cx + w * 0.10, h * 0.45),
 		Vector2(cx + w * 0.50, h * 0.55),
 		Vector2(cx + w * 0.22, h * 0.60),
 		Vector2(cx + w * 0.12, h * 0.53),
 	])
-	add_child(_wing_right)
+	add_child(_wing_r)
 
-	# --- 꼬리/수직미익(Tail/Fin)
 	_tail = Polygon2D.new()
 	_tail.color = tail_color
 	_tail.polygon = PackedVector2Array([
 		Vector2(cx - w * 0.06, h * 0.70),
-		Vector2(cx,               h * 0.58),
+		Vector2(cx,             h * 0.58),
 		Vector2(cx + w * 0.06, h * 0.70),
 		Vector2(cx + w * 0.03, h * 0.95),
 		Vector2(cx - w * 0.03, h * 0.95),
 	])
 	add_child(_tail)
 
-	# --- 캐노피/조종석(Canopy)
 	_canopy = Polygon2D.new()
 	_canopy.color = cockpit_color
 	_canopy.polygon = PackedVector2Array([
-		Vector2(cx,               h * 0.08),
+		Vector2(cx,            h * 0.08),
 		Vector2(cx - w * 0.08, h * 0.32),
-		Vector2(cx,               h * 0.36),
+		Vector2(cx,            h * 0.36),
 		Vector2(cx + w * 0.08, h * 0.32),
 	])
 	add_child(_canopy)
 
 func _build_engine_flame() -> void:
-	# 간단한 흰 점 텍스처
+	# 작은 도트 텍스처
 	var img = Image.create(2, 2, false, Image.FORMAT_RGBA8)
 	img.fill(Color(1, 1, 1, 1))
 	var tex = ImageTexture.create_from_image(img)
@@ -187,8 +237,8 @@ func _build_engine_flame() -> void:
 	_flame.lifetime = 0.25
 	_flame.preprocess = 0.05
 	_flame.local_coords = true
-	# 엔진 위치: 하단 중앙
-	_flame.position = Vector2(ship_size.x * 0.5, ship_size.y)
+	# 엔진 위치: 하단 중앙 (텍스처든 폴리곤이든 _ship_size 기준)
+	_flame.position = Vector2(_ship_size.x * 0.5, _ship_size.y)
 
 	var pm = ParticleProcessMaterial.new()
 	pm.direction = Vector3(0, 1, 0)
@@ -198,7 +248,6 @@ func _build_engine_flame() -> void:
 	pm.scale_min = 0.6
 	pm.scale_max = 1.2
 
-	# Gradient → GradientTexture1D 로 램프 생성 (이전 버그 해결)
 	var grad = Gradient.new()
 	grad.add_point(0.0, flame_head)
 	grad.add_point(1.0, flame_tail)

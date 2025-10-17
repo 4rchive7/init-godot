@@ -1,7 +1,8 @@
 # GameLayer.gd
 # Godot 4.4 / GDScript
-# StarField.gd(배경) + ShardParticles.gd(파편) + ObstacleController.gd(장애물) + GameHUD.gd(HUD) + PlayerController.gd(플레이어)로 분리 적용
-# - 본 파일은 입력/HP/충돌/게임오버 타이머만 담당
+# StarField(배경) + ShardParticles(파편) + ObstacleController(장애물) + GameHUD(HUD) + PlayerController(플레이어)
+# 타임 어택: 빨간 박스에 맞으면 HP 감소 + "잠시 전체 속도 슬로우"(time_scale) 적용
+# - 슬로우는 실제 시간 기준으로 자동 복구(타이머 ignore_time_scale=true)
 
 extends Control
 signal finished  # 게임오버 후 3초 뒤 emit
@@ -15,6 +16,7 @@ signal finished  # 게임오버 후 3초 뒤 emit
 @export var bg_color_ground: Color = Color(0.15, 0.15, 0.18)
 @export var player_color: Color = Color(0.3, 0.8, 1.0)
 @export var obstacle_color: Color = Color(1.0, 0.35, 0.35)
+
 @export var text_color: Color = Color.WHITE
 @export var gameover_text_color: Color = Color(1, 0.4, 0.4)
 @export var font_size_label: int = 20
@@ -24,11 +26,17 @@ signal finished  # 게임오버 후 3초 뒤 emit
 @export var gravity: float = 900.0
 @export var jump_force: float = -500.0
 @export var player_size: Vector2 = Vector2(44, 44)
+
 @export var obstacle_size: Vector2 = Vector2(36, 36)
 @export var obstacle_speed_start: float = 260.0
 @export var obstacle_speed_hit_add: float = 10.0
+
 @export var hp_max: int = 3
 @export var gameover_wait: float = 3.0
+
+# --- 히트 슬로우(타임 어택 연출) ---
+@export var hit_slow_factor: float = 0.6      # 0.0~1.0 (작을수록 더 느리게)
+@export var hit_slow_duration: float = 0.6     # 초 단위 (실시간 기준)
 
 # 파편(ShardParticles)에 넘길 기본값
 const _PARTICLE_COUNT_HIT: int = 3
@@ -55,6 +63,10 @@ var _player_ctrl: Node
 
 var _ground: ColorRect
 var _gameover_delay_timer: Timer
+
+# 슬로우 관리
+var _slow_timer: Timer
+var _is_slowed: bool = false
 
 func _ready() -> void:
 	_set_full_rect(self)
@@ -141,6 +153,14 @@ func _ready() -> void:
 	_gameover_delay_timer.timeout.connect(_on_gameover_delay_done)
 	add_child(_gameover_delay_timer)
 
+	# --- 슬로우(실시간 복구) 타이머 ---
+	_slow_timer = Timer.new()
+	_slow_timer.one_shot = true
+	_slow_timer.wait_time = hit_slow_duration
+	_slow_timer.ignore_time_scale = true   # 전체 time_scale이 느려져도 지정된 실제 시간으로 복구
+	_slow_timer.timeout.connect(_on_slowdown_over)
+	add_child(_slow_timer)
+
 	set_process(true)
 	set_process_input(true)
 
@@ -206,9 +226,13 @@ func _on_hit_obstacle() -> void:
 	if _hud and "tint_hp_hit" in _hud:
 		_hud.tint_hp_hit()
 
+	# 난이도 증가(기존)
 	_obstacle_speed += obstacle_speed_hit_add
 	if _obstacle_ctrl and "set_speed" in _obstacle_ctrl:
 		_obstacle_ctrl.set_speed(_obstacle_speed)
+
+	# --- 히트 슬로우 적용 ---
+	_apply_hit_slowdown()
 
 	if _hp <= 0:
 		_trigger_game_over()
@@ -224,9 +248,32 @@ func _on_hit_obstacle() -> void:
 		add_child(t)
 		t.start()
 
+# ----- 히트 슬로우 -----
+func _apply_hit_slowdown() -> void:
+	if hit_slow_factor <= 0.0:
+		hit_slow_factor = 0.1
+	if hit_slow_factor > 1.0:
+		hit_slow_factor = 1.0
+	# 전체 트리 슬로우
+	Engine.time_scale = hit_slow_factor
+	_is_slowed = true
+	# 남은 시간이 있어도 갱신해서 마지막 히트 시점 기준으로 유지
+	_slow_timer.stop()
+	_slow_timer.wait_time = hit_slow_duration
+	_slow_timer.start()
+
+func _on_slowdown_over() -> void:
+	_reset_time_scale()
+
+func _reset_time_scale() -> void:
+	if _is_slowed:
+		Engine.time_scale = 1.0
+	_is_slowed = false
+
 # ----- 게임오버 -----
 func _trigger_game_over() -> void:
 	_is_game_over = true
+	_reset_time_scale()
 
 	# 플레이어 폭발 파편(사방향)
 	if _player_ctrl and _shards and "get_player_center" in _player_ctrl and "spawn_radial_shards" in _shards:
@@ -242,9 +289,8 @@ func _trigger_game_over() -> void:
 			620.0
 		)
 
-	# 플레이어 사라짐
-	if _player_ctrl and _player_ctrl.has_node("."):
-		# PlayerController는 내부 ColorRect를 쓰므로 컨트롤러 자체를 제거
+	# 플레이어 제거
+	if _player_ctrl:
 		_player_ctrl.queue_free()
 
 	# HUD 갱신
@@ -257,6 +303,10 @@ func _trigger_game_over() -> void:
 
 func _on_gameover_delay_done() -> void:
 	emit_signal("finished")
+
+func _exit_tree() -> void:
+	# 어떤 경로로든 씬을 벗어날 때 원복 보장
+	_reset_time_scale()
 
 # ----- 유틸 -----
 func _set_full_rect(ctrl: Control) -> void:
