@@ -14,7 +14,16 @@ var _particles: Array = []  # { "node": ColorRect, "vel": Vector2, "ttl": float,
 var _rng: RandomNumberGenerator
 
 func _ready() -> void:
-	_set_full_rect(self)
+	# ⚠️ stack overflow 방지: 헬퍼 함수 호출 없이 여기서 직접 FULL_RECT 적용
+	anchor_left = 0
+	anchor_top = 0
+	anchor_right = 1
+	anchor_bottom = 1
+	offset_left = 0
+	offset_top = 0
+	offset_right = 0
+	offset_bottom = 0
+
 	_rng = RandomNumberGenerator.new()
 	_rng.randomize()
 	set_process(true)
@@ -55,9 +64,10 @@ func spawn_radial_shards(center_pos: Vector2, count: int, size_px: Vector2, life
 	var i: int = 0
 	while i < count:
 		var shard = ColorRect.new()
+		# ⚠️ Color.from_hsv는 정적 메서드로 호출 (인스턴스에서 부르면 드물게 이상 동작 보고)
 		var hue_shift: float = _rng.randf_range(-0.04, 0.04)
 		var c: Color = base_color
-		c = c.from_hsv(
+		c = Color.from_hsv(
 			fposmod(c.h + hue_shift, 1.0),
 			clamp(c.s + _rng.randf_range(-0.15, 0.15), 0.0, 1.0),
 			clamp(c.v + _rng.randf_range(-0.10, 0.10), 0.0, 1.0),
@@ -124,14 +134,3 @@ func _update_particles(delta: float) -> void:
 				node.queue_free()
 			_particles.remove_at(i)
 		i -= 1
-
-# ---- 유틸 ----
-func _set_full_rect(ctrl: Control) -> void:
-	ctrl.anchor_left = 0
-	ctrl.anchor_top = 0
-	ctrl.anchor_right = 1
-	ctrl.anchor_bottom = 1
-	ctrl.offset_left = 0
-	ctrl.offset_top = 0
-	ctrl.offset_right = 0
-	ctrl.offset_bottom = 0
