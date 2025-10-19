@@ -2,17 +2,25 @@
 # Godot 4.4 / GDScript
 # ▶ 3개 라인 + 중력 점프
 # ▶ 원근 스케일: [위 0.9, 가운데 1.0, 아래 1.1]
-# ▶ 요구 반영: "라인에 정확히 도착하기 '직전'까지만" 스케일 보간.
-#    - 라인 이동 시작 시점의 스케일부터 목표 라인의 스케일까지 진행률 기반 보간
-#    - 목표 라인에 도착하는 프레임에서 즉시 보간 종료(= 목표 스케일로 스냅)
+# ▶ "라인에 정확히 도착하기 직전까지만" 스케일 보간
 # ▶ z-index 최상단 유지
+# ▶ [추가] 이 객체의 (0,0) 위치에 타원형 그림자 표시 (자식 Node2D로 원을 그리고 Y 스케일로 납작하게)
 
 extends Control
+
+# ───────── 내부 로컬 클래스: 타원 그림자 ─────────
+class ShadowOval:
+	extends Node2D
+	var radius: float = 20.0       # 원의 반지름(그림자 기본 크기)
+	var color: Color = Color(0,0,0,0.35)
+	func _draw() -> void:
+		# 원을 그린 뒤, 상위에서 이 노드의 scale.y 를 낮게 주어 타원 효과
+		draw_circle(Vector2.ZERO, radius, color)
 
 # --- 라인/스케일 ---
 @export var use_lanes: bool = true
 @export var lane_snap_speed: float = 900.0
-@export var scale_lerp_speed: float = 6.0   # (참고값) 이제는 진행률 보간이라 직접 사용하진 않음
+@export var scale_lerp_speed: float = 6.0
 var _lanes: Array = []
 var _lane_index: int = 1
 var _lane_target_y: float = 0.0
@@ -54,6 +62,7 @@ var _wing_l: Polygon2D
 var _wing_r: Polygon2D
 var _tail: Polygon2D
 var _canopy: Polygon2D
+var _shadow: ShadowOval   # ★ 타원 그림자
 
 func _ready() -> void:
 	# 최상단 렌더링
@@ -77,6 +86,9 @@ func setup(ground_y: float, size: Vector2, color: Color, start_x: float) -> void
 		_build_sprite(tex as Texture2D)
 	else:
 		_build_polygon_ship(size, color)
+
+	# ★ 그림자 생성/업데이트 (항상 (0,0)에 배치)
+	_ensure_shadow()
 
 	_base_x = start_x
 	position = Vector2(_base_x, _ground_y - _ship_size.y)
@@ -104,6 +116,9 @@ func set_lanes(lanes_y: Array, start_lane_index: int) -> void:
 		scale = Vector2(_current_scale, _current_scale)
 		_lane_move_active = false
 
+		# 라인이 정해졌을 때도 그림자 크기 재설정
+		_update_shadow_shape()
+
 # 외부에서 라인별 스케일 지정 가능
 func set_lane_scales(arr: Array) -> void:
 	if arr.size() >= 3:
@@ -111,6 +126,7 @@ func set_lane_scales(arr: Array) -> void:
 		_current_scale = _get_lane_scale(_lane_index)
 		_target_scale = _current_scale
 		scale = Vector2(_current_scale, _current_scale)
+		_update_shadow_shape()
 
 func change_lane(delta_idx: int) -> void:
 	if _lanes.size() == 0:
@@ -148,7 +164,6 @@ func update_player(delta: float) -> void:
 		var dy: float = _lane_target_y - position.y
 		if dy != 0.0:
 			var step: float = lane_snap_speed * delta
-			# 다음 스텝이 목표를 넘어가면 "그 프레임에서" 정확히 도착 처리 + 보간 종료
 			if abs(dy) <= step:
 				position.y = _lane_target_y
 				if _lane_move_active:
@@ -157,26 +172,18 @@ func update_player(delta: float) -> void:
 					_lane_move_active = false
 			else:
 				position.y += step * sign(dy)
-				# ★ 진행률 기반 스케일 보간 (도착 '직전'까지만)
+				# 진행률 기반 스케일 보간 (도착 '직전'까지만)
 				if _lane_move_active:
 					var total: float = max(abs(_lane_move_total_dy), 0.0001)
 					var progressed: float = clamp(abs(position.y - _lane_move_start_y) / total, 0.0, 1.0)
-					# progressed==1.0에 도달하는 프레임은 위 if(abs(dy)<=step) 분기에서 처리되어 보간이 끝남
 					var s: float = lerp(_lane_move_start_scale, _target_scale, progressed)
 					_current_scale = s
 					scale = Vector2(s, s)
-		else:
-			# 이미 타겟에 있는 경우: 스케일도 목표값으로 정돈, 보간 비활성화
-			if _lane_move_active:
-				_current_scale = _target_scale
-				scale = Vector2(_current_scale, _current_scale)
-				_lane_move_active = false
 
 func jump() -> void:
 	if not _is_jumping:
 		_vel_y = jump_force
 		_is_jumping = true
-		# 점프 중에는 라인 이동 보간이 없으므로 스케일은 유지
 
 func is_on_floor() -> bool:
 	return position.y >= _get_current_floor_y() and _vel_y == 0.0
@@ -212,6 +219,7 @@ func _get_lane_scale(idx: int) -> float:
 
 func _clear_visuals() -> void:
 	for c in get_children():
+		# ★ 그림자는 유지, 나머지 비주얼만 정리
 		if c is Sprite2D or c is Polygon2D:
 			c.queue_free()
 	_sprite = null
@@ -229,6 +237,7 @@ func _build_sprite(tex: Texture2D) -> void:
 	_sprite.scale = Vector2(ship_scale, ship_scale)
 	_sprite.z_as_relative = false
 	_sprite.z_index = 4096
+	_sprite.position = Vector2(0, -20)
 	_sprite.rotate(0.13)
 	add_child(_sprite)
 	_ship_size = tex.get_size() * ship_scale
@@ -305,8 +314,36 @@ func _build_polygon_ship(size: Vector2, color: Color) -> void:
 	_canopy.z_index = 4096
 	add_child(_canopy)
 
+	# 폴리곤 기반에서도 그림자 반영
+	_ensure_shadow()
+
 func _apply_topmost_z_to_children() -> void:
 	for c in get_children():
 		if c is CanvasItem:
 			(c as CanvasItem).z_as_relative = false
 			(c as CanvasItem).z_index = 4096
+	# 그림자는 배 아래쪽으로 (살짝 낮은 z)
+	if _shadow:
+		_shadow.z_as_relative = false
+		_shadow.z_index = 4095
+
+# ───────── 그림자 생성/업데이트 ─────────
+func _ensure_shadow() -> void:
+	if _shadow == null:
+		_shadow = ShadowOval.new()
+		# 요구: "이 객체의 0,0 포지션에" 그림자 → 로컬 (0,0)에 배치
+		_shadow.position = Vector2.ZERO
+		_shadow.z_as_relative = false
+		_shadow.z_index = 4095   # 배(4096) 바로 아래
+		add_child(_shadow)
+	_update_shadow_shape()
+
+func _update_shadow_shape() -> void:
+	if _shadow == null:
+		return
+	# 배 크기 기준으로 적당한 그림자 반경과 납작 비율 설정
+	var base: float = max(_ship_size.x, _ship_size.y)
+	_shadow.radius = base * 0.45
+	# 납작한 타원 효과: 이 노드 자체의 스케일로 압축
+	_shadow.scale = Vector2(1.0, 0.35)
+	_shadow.queue_redraw()
