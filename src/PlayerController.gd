@@ -332,7 +332,7 @@ func _ensure_shadow() -> void:
 	if _shadow == null:
 		_shadow = ShadowOval.new()
 		# 요구: "이 객체의 0,0 포지션에" 그림자 → 로컬 (0,0)에 배치
-		_shadow.position = Vector2.ZERO
+		_shadow.position = Vector2(60,40)
 		_shadow.z_as_relative = false
 		_shadow.z_index = 4095   # 배(4096) 바로 아래
 		add_child(_shadow)
@@ -345,5 +345,5 @@ func _update_shadow_shape() -> void:
 	var base: float = max(_ship_size.x, _ship_size.y)
 	_shadow.radius = base * 0.45
 	# 납작한 타원 효과: 이 노드 자체의 스케일로 압축
-	_shadow.scale = Vector2(1.0, 0.35)
+	_shadow.scale = Vector2(1.0, 0.2)
 	_shadow.queue_redraw()
