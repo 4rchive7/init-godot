@@ -509,41 +509,65 @@ func _set_full_rect(ctrl: Control) -> void:
 	ctrl.offset_top = 0
 	ctrl.offset_right = 0
 	ctrl.offset_bottom = 0
-
 # =========================
-# ✅ 레인 가이드 유틸
+# ✅ 레인 가이드 유틸 (홀로그램 노란빛 도로)
 # =========================
 func _ensure_lane_guides_created() -> void:
 	# 이미 있으면 스킵
 	if _lane_guides.size() == 3:
 		return
-	# 기존 것 정리
 	for g in _lane_guides:
 		if is_instance_valid(g):
 			g.queue_free()
 	_lane_guides.clear()
 
-	# 위/가운데/아래 3줄 생성
-	var i: int = 0
-	while i < 3:
-		var line = ColorRect.new()
-		line.color = lane_guide_color
-		line.custom_minimum_size = Vector2(_view_size.x, lane_guide_thickness)
-		line.set_anchors_preset(Control.PRESET_TOP_LEFT)
-		line.z_as_relative = false
-		line.z_index = Z_CENTER   # 별보다 위, 장애물/플레이어보다 아래
-		add_child(line)
-		_lane_guides.append(line)
-		i += 1
+	# 세 개의 레인 박스 생성
+	for i in range(3):
+		var rect = ColorRect.new()
+		rect.color = Color(1.0, 1.0, 0.4, 0.8)  # 반투명 노란빛 기본색
+		rect.set_anchors_preset(Control.PRESET_TOP_LEFT)
+		rect.z_as_relative = false
+		rect.z_index = Z_CENTER  # 별보다 위, 플레이어보다 아래
+		add_child(rect)
+
+		# 테두리 및 홀로그램 느낌을 위한 StyleBoxFlat
+		var style = StyleBoxFlat.new()
+		style.bg_color = Color(0, 1.0, 0.0, 1)  # 약한 노란빛 배경
+		style.border_color = Color(0, 1, 0, 1) # 주황빛 테두리
+		style.set_border_width_all(100)
+		style.set_corner_radius_all(8)
+		style.shadow_color = Color(1.0, 1.0, 0.0, 1)
+		style.shadow_size = 8
+		rect.add_theme_stylebox_override("panel", style)
+
+		# # 반투명 글로우 느낌 (CanvasItemMaterial)
+		# var mat = CanvasItemMaterial.new()
+		# mat.emission_enabled = true
+		# mat.emission = Color(1.0, 0.85, 0.3, 0.4)
+		# mat.emission_energy = 1.4
+		# mat.light_mode = CanvasItemMaterial.LIGHT_MODE_LIGHT_ONLY
+		# rect.material = mat
+
+		_lane_guides.append(rect)
+
 
 func _update_lane_guides_positions() -> void:
 	if _lane_guides.size() != 3 or _lanes_y.size() != 3:
 		return
-	# 각 라인의 y에 얇은 선 배치
-	var i: int = 0
-	while i < 3:
-		var line: ColorRect = _lane_guides[i]
-		if is_instance_valid(line):
-			line.custom_minimum_size = Vector2(_view_size.x, lane_guide_thickness)
-			line.position = Vector2(0, float(_lanes_y[i]))
-		i += 1
+
+	var lane_height: float = lane_gap * 1.1   # 약간 더 두껍게
+	var half_h: float = lane_height * 0.5
+
+	for i in range(3):
+		var rect: ColorRect = _lane_guides[i]
+		if not is_instance_valid(rect):
+			continue
+		rect.position.x = 0
+		rect.position.y = float(_lanes_y[i]) #- half_h
+		rect.custom_minimum_size = Vector2(_view_size.x, lane_height)
+
+		# 레인별로 밝기 조금씩 다르게 (홀로그램 느낌)
+		var base = 0.4 + float(i) * 0.1
+		var mat: CanvasItemMaterial = rect.material
+		if mat:
+			mat.emission = Color(1.0, 0.9, 0.5, base)
