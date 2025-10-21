@@ -53,10 +53,10 @@ signal finished
 @export var no_overtake_safety: float = 0.98
 
 # 중앙 레일 장식
-@export var center_asset_path: String =""# "res://assets/lane.png"
-@export var center_asset_scale: float = 1.0
-@export var center_asset_gap_px: float = 480.0
-@export var center_asset_y_offset: float = 0.0
+@export var center_asset_path: String ="res://assets/lane.png"
+@export var center_asset_scale: float = 0.5
+@export var center_asset_gap_px: float = 240.0
+@export var center_asset_y_offset: float = 23.0
 @export var center_asset_zindex: int = -10000
 
 # ✅ 레인 가이드 라인(3개) 설정
