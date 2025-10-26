@@ -1,206 +1,168 @@
 # StarField.gd
 # Godot 4.4 / GDScript
-# ─────────────────────────────────────────────────────────
-# 우주 배경(더 어두운 톤) + 별 파티클(오른쪽→왼쪽 직선 이동)
-# - 장애물이 빨라질수록 별도 같은 비율로 빨라짐
-# - 히트 슬로우(Engine.time_scale) 동안 별도 같이 느려지고,
-#   복구될 때까지 그대로 유지(프레임마다 time_scale을 곱해 반영)
-# - 별이 위/아래로 흔들리지 않도록 Y 성분 완전 차단(spread=0, gravity=0)
-# - 동시 표시 수 50 미만 유지
-# ─────────────────────────────────────────────────────────
+# ▶ 요구사항 반영:
+#   - 별은 "화면 밖 오른쪽"에서만 생성되고,
+#   - "화면 밖 왼쪽"에 도달하면(수명 종료로) 사라집니다.
+#   - 따라서 화면 중간에서 갑자기 생성되거나 사라지는 일이 없습니다.
+# ▶ 설계 방식:
+#   - GPUParticles2D 사용, emission_shape=BOX + emission_shape_offset로 방출 지점을
+#     화면 우측 밖(+margin)으로 이동.
+#   - lifetime = (화면너비 + 양쪽 margin) / 속도 로 계산 → 왼쪽 밖에서 자연 소멸.
+#   - preprocess=0으로 초기 충전 금지(처음엔 비어 있다가 우측에서 들어옴).
+#   - 수평 이동(왼쪽)만, 수직 떨림/가속 없음.
+#   - 총 별 개수 50 미만 유지(먼층 15, 가까운층 20 = 35).
 
 extends Control
 
-# 더 어두운 우주색 (상하 그라디언트)
-@export var bg_top: Color = Color(0.01, 0.01, 0.025, 1.0)
-@export var bg_bottom: Color = Color(0.0, 0.0, 0.0, 1.0)
+@export var bg_color: Color = Color(0.05, 0.03, 0.08, 1.0)  # 어두운 우주 보랏빛
+@export var base_speed: float = 180.0                       # px/s 기준
+@export var far_speed_mul: float = 0.5
+@export var near_speed_mul: float = 1.0
 
-# 별 개수(동시 표시 최대) — 50 미만 유지
-@export var max_visible_stars: int = 46
+# 별 개수(총합<50 유지)
+@export var far_amount: int = 15
+@export var near_amount: int = 20
 
-# 별 기본 이동 속도(px/s) — 장애물 기본 속도일 때의 별 속도
-@export var base_star_speed: float = 140.0
+# 별 크기(픽셀)
+@export var far_size_px: float = 1.5
+@export var near_size_px: float = 2.0
 
-# 장애물 기본 속도(px/s) — ObstacleController의 시작 속도와 맞추면 1배율
-@export var base_obstacle_speed: float = 260.0
+# 내부: 화면 밖 여유 마진(생성/소멸 지점)
+@export var edge_margin_px: float = 64.0
 
-# 배율 상/하한
-@export var min_speed_multiplier: float = 0.35
-@export var max_speed_multiplier: float = 4.0
-
-# 별 크기 범위
-@export var star_scale_min: float = 0.6
-@export var star_scale_max: float = 1.8
-
-# 내부
+# 내부 노드
 var _bg: ColorRect
-var _stars: GPUParticles2D
-var _pm: ParticleProcessMaterial
-var _view_size: Vector2
-var _obstacle_node: Node = null
+var _far: GPUParticles2D
+var _near: GPUParticles2D
 
 func _ready() -> void:
 	_set_full_rect(self)
-	_view_size = get_viewport_rect().size
 
-	_make_background()
-	_make_stars()
-	_find_obstacle_node()
-
-	connect("resized", Callable(self, "_on_resized"))
-	set_process(true)
-
-func _process(_delta: float) -> void:
-	# 장애물 속도 비율 × 전역 time_scale 을 매 프레임 반영
-	var mult: float = 1.0
-	var ob_speed: float = _get_obstacle_speed()
-	if base_obstacle_speed > 0.0 and ob_speed > 0.0:
-		mult = ob_speed / base_obstacle_speed
-
-	# 히트 슬로우 시 별도 함께 느려지고, time_scale 복구 전까지 유지
-	mult *= Engine.time_scale
-
-	mult = clamp(mult, min_speed_multiplier, max_speed_multiplier)
-	_apply_speed_multiplier(mult)
-
-# ───────────────────── 배경 ─────────────────────
-func _make_background() -> void:
-	if is_instance_valid(_bg):
-		_bg.queue_free()
+	# 어두운 우주 배경
 	_bg = ColorRect.new()
+	_bg.color = bg_color
 	_set_full_rect(_bg)
-
-	var grad = Gradient.new()
-	grad.add_point(0.0, bg_top)
-	grad.add_point(1.0, bg_bottom)
-	var grad_tex = GradientTexture2D.new()
-	grad_tex.gradient = grad
-	grad_tex.width = 4
-	grad_tex.height = 4
-
-	var mat = ShaderMaterial.new()
-	var shader = Shader.new()
-	shader.code = """
-		shader_type canvas_item;
-		uniform sampler2D grad_tex : source_color, filter_linear_mipmap;
-		void fragment() {
-			COLOR = texture(grad_tex, vec2(0.5, UV.y));
-		}
-	"""
-	mat.shader = shader
-	mat.set_shader_parameter("grad_tex", grad_tex)
-	_bg.material = mat
-
 	add_child(_bg)
-	move_child(_bg, 0)
+	_bg.z_as_relative = false
+	_bg.z_index = -20000
 
-# ───────────────────── 별 파티클 ─────────────────────
-func _make_stars() -> void:
-	if is_instance_valid(_stars):
-		_stars.queue_free()
+	# 파티클 레이어(먼/가까운)
+	_far = _make_star_layer(far_amount, far_size_px, base_speed * far_speed_mul)
+	_near = _make_star_layer(near_amount, near_size_px, base_speed * near_speed_mul)
 
-	_stars = GPUParticles2D.new()
-	_stars.local_coords = false
-	_stars.emitting = true
-	_stars.amount = max_visible_stars         # 동시 표시 상한 (50 미만)
-	_stars.lifetime = 2.0
-	_stars.preprocess = 0.2
-	add_child(_stars)
-	move_child(_stars, 1)
+	add_child(_far)
+	add_child(_near)
 
-	_pm = ParticleProcessMaterial.new()
+	# 레이어 z (배경 위, 다른 요소 뒤)
+	_far.z_as_relative = false
+	_near.z_as_relative = false
+	_far.z_index = -15000
+	_near.z_index = -14900
 
-	# 방출 영역: 화면 오른쪽 좁은 세로 박스
-	_pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
-	_pm.emission_box_extents = Vector3(2.0, max(8.0, _view_size.y * 0.5), 0.0)
+# ── 레이어 생성 ───────────────────────────────────────────────────────────
+func _make_star_layer(amount: int, size_px: float, speed: float) -> GPUParticles2D:
+	var view: Rect2 = get_viewport_rect()
+	var vw: float = max(view.size.x, 1.0)
+	var vh: float = max(view.size.y, 1.0)
+	var margin: float = edge_margin_px
 
-	# 이동 방향: 왼쪽으로 "정확히" 직선 (Y 흔들림 방지)
-	_pm.direction = Vector3(-1, 0, 0)
-	_pm.spread = 0.0                # 각도 퍼짐 0 → 위/아래 성분 없음
-	_pm.gravity = Vector3(0, 0, 0)  # 중력 없음
-	_pm.damping = Vector2(0.0, 0.0)
-	_pm.angular_velocity_min = 0.0
-	_pm.angular_velocity_max = 0.0
-	_pm.orbit_velocity = Vector2(0.0, 0.0)
-	_pm.radial_accel = Vector2(0.0, 0.0)
-	_pm.tangential_accel = Vector2(0.0, 0.0)
-
-	# 크기/스케일
-	_pm.scale_min = star_scale_min
-	_pm.scale_max = star_scale_max
-
-	# 보라빛 꼬리
-	var ramp = Gradient.new()
-	ramp.add_point(0.0, Color(0.90, 0.78, 1.0, 0.95))
-	ramp.add_point(1.0, Color(0.45, 0.25, 0.65, 0.0))
-	var ramp_tex = GradientTexture1D.new()
-	ramp_tex.gradient = ramp
-	_pm.color_ramp = ramp_tex
-
-	# 별 점 텍스처
+	# 별 텍스처(작은 흰 점)
 	var img = Image.create(2, 2, false, Image.FORMAT_RGBA8)
 	img.fill(Color(1, 1, 1, 1))
-	var dot_tex = ImageTexture.create_from_image(img)
+	var dot = ImageTexture.create_from_image(img)
 
-	_stars.process_material = _pm
-	_stars.texture = dot_tex
+	# 수명 = (오른쪽 밖 → 왼쪽 밖) 이동 시간
+	var travel_w: float = vw + margin * 2.0
+	var spd: float = max(speed, 1.0)
+	var lifetime_calc: float = travel_w / spd
 
-	# 초기 속도 적용
-	_apply_speed_multiplier(1.0)
+	var p = GPUParticles2D.new()
+	p.amount = amount
+	p.lifetime = lifetime_calc
+	p.one_shot = false
+	p.preprocess = 0.0            # ★ 초기 충전 금지(중간 생성 방지)
+	p.local_coords = false        # 전역 좌표
 
-func _apply_speed_multiplier(mult: float) -> void:
-	# 별 이동 속도
-	var star_v: float = max(1.0, base_star_speed * mult)
-	_pm.initial_velocity_min = star_v * 0.9
-	_pm.initial_velocity_max = star_v * 1.1
+	# 컬링 방지용 가시영역(좌우 바깥까지 넉넉히)
+	p.visibility_rect = Rect2(-vw, -vh * 0.5, vw * 3.0, vh * 2.0)
 
-	# lifetime을 화면 너비에 맞춰 조정 → 동시 표시 수는 amount로 제한되므로 50 미만 유지
-	var travel_time: float = _view_size.x / star_v
-	_stars.lifetime = clamp(travel_time * 1.05, 0.4, 8.0)
+	var pm = ParticleProcessMaterial.new()
+	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	# 방출 상자: 얇은 세로 띠(우측 밖)
+	pm.emission_box_extents = Vector3(2.0, vh * 0.55, 0.0)
+	# 화면 중앙 기준으로 우측 끝 + margin 만큼 오프셋 (Emitter는 중앙)
+	pm.emission_shape_offset = Vector3(vw * 0.5 + margin, 0.0, 0.0)
 
-	# 방출 위치를 화면 오른쪽 가장자리에 고정
-	_stars.position = Vector2(_view_size.x + 4.0, _view_size.y * 0.5)
+	# 수평으로 왼쪽 이동
+	pm.direction = Vector3(-1, 0, 0)
+	pm.spread = 0.0
 
-func _get_obstacle_speed() -> float:
-	# 캐시 재탐색
-	if _obstacle_node == null or not is_instance_valid(_obstacle_node):
-		_find_obstacle_node()
-	if _obstacle_node != null and "get_speed" in _obstacle_node:
-		return float(_obstacle_node.get_speed())
-	return 0.0
+	# 속도(조금의 분산 허용)
+	pm.initial_velocity_min = spd * 0.95
+	pm.initial_velocity_max = spd * 1.05
 
-func _find_obstacle_node() -> void:
-	var p = get_parent()
-	if p == null:
-		return
-	for n in p.get_children():
-		if n == self:
-			continue
-		if "get_speed" in n:
-			_obstacle_node = n
-			return
+	# 불필요한 가속/회전/감쇠 OFF
+	pm.gravity = Vector3(0, 0, 0)
+	pm.linear_accel_min = 0.0
+	pm.linear_accel_max = 0.0
+	pm.angular_velocity_min = 0.0
+	pm.angular_velocity_max = 0.0
+	pm.damping_min = 0.0
+	pm.damping_max = 0.0
+	pm.radial_accel_min = 0.0
+	pm.radial_accel_max = 0.0
+	pm.tangential_accel_min = 0.0
+	pm.tangential_accel_max = 0.0
 
-# 외부에서 직접 배속 지정이 필요할 때(선택)
-func set_speed_multiplier(mult: float) -> void:
-	mult = clamp(mult, min_speed_multiplier, max_speed_multiplier)
-	_apply_speed_multiplier(mult)
+	# 별 크기
+	pm.scale_min = size_px
+	pm.scale_max = size_px
 
-func sync_with_obstacle_speed(obstacle_speed: float) -> void:
-	if base_obstacle_speed <= 0.0:
-		return
-	var mult: float = clamp(obstacle_speed / base_obstacle_speed, min_speed_multiplier, max_speed_multiplier)
-	# 전역 time_scale도 반영(히트 슬로우 시 시각 일치)
-	mult *= Engine.time_scale
-	_apply_speed_multiplier(mult)
+	p.process_material = pm
+	p.texture = dot
+	p.emitting = true
 
-# ───────────────────── 기타 ─────────────────────
-func _on_resized() -> void:
-	_view_size = get_viewport_rect().size
-	_make_background()
-	if _pm != null and _stars != null:
-		_pm.emission_box_extents = Vector3(2.0, max(8.0, _view_size.y * 0.5), 0.0)
-		_stars.position = Vector2(_view_size.x + 4.0, _view_size.y * 0.5)
+	# Emitter는 화면 중앙에 두되, emission_shape_offset으로 우측 밖에서만 생성
+	p.position = Vector2(vw * 0.5, vh * 0.5)
+	return p
 
+# ── 공개 API ──────────────────────────────────────────────────────────────
+# GameLayer 등에서 별 속도를 동기화할 때 호출하세요.
+func set_speed_px(sec_speed: float) -> void:
+	base_speed = max(sec_speed, 0.0)
+	_update_layer_speeds_and_lifetimes()
+
+func set_parallax(far_mul: float, near_mul: float) -> void:
+	far_speed_mul = max(far_mul, 0.0)
+	near_speed_mul = max(near_mul, 0.0)
+	_update_layer_speeds_and_lifetimes()
+
+# ── 내부 갱신 ─────────────────────────────────────────────────────────────
+func _update_layer_speeds_and_lifetimes() -> void:
+	var view: Rect2 = get_viewport_rect()
+	var vw: float = max(view.size.x, 1.0)
+	var margin: float = edge_margin_px
+
+	# FAR
+	if _far and _far.process_material is ParticleProcessMaterial:
+		var spd_f: float = max(base_speed * far_speed_mul, 1.0)
+		var pmf: ParticleProcessMaterial = _far.process_material
+		pmf.initial_velocity_min = spd_f * 0.95
+		pmf.initial_velocity_max = spd_f * 1.05
+		_far.lifetime = (vw + margin * 2.0) / spd_f
+		# 방출 오프셋도 화면 크기 변화 시 재계산(보통은 고정)
+		pmf.emission_shape_offset = Vector3(vw * 0.5 + margin, 0.0, 0.0)
+
+	# NEAR
+	if _near and _near.process_material is ParticleProcessMaterial:
+		var spd_n: float = max(base_speed * near_speed_mul, 1.0)
+		var pmn: ParticleProcessMaterial = _near.process_material
+		pmn.initial_velocity_min = spd_n * 0.95
+		pmn.initial_velocity_max = spd_n * 1.05
+		_near.lifetime = (vw + margin * 2.0) / spd_n
+		pmn.emission_shape_offset = Vector3(vw * 0.5 + margin, 0.0, 0.0)
+
+# ── 유틸 ──────────────────────────────────────────────────────────────────
 func _set_full_rect(ctrl: Control) -> void:
 	ctrl.anchor_left = 0
 	ctrl.anchor_top = 0
