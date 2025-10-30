@@ -3,7 +3,7 @@
 # SRP: "오케스트레이션"만 담당
 #  - 배경, 스타필드, HUD, 플레이어, 장애물 컨트롤러 생성/연결
 #  - 속도 싱크(StarField 속도, Decor 스크롤)
-#  - 충돌 후 HP/HUD 업데이트, 속도 리셋, 파편, 게임오버
+#  - 충돌 후 HP/HUD 업데이트, 속도 리셋/감속/가속, 파편, 게임오버
 #  - Decor(레인 가이드/레인마다 장식)는 TrackDecor.gd에 100% 위임
 #
 # ⬇ z_index 레이어 재정의
@@ -16,10 +16,6 @@
 #  Z_FG_BASE(100)  : 플레이어/장애물 본체 (lane마다 100,102,104...)
 #  Shards(150)     : 충돌 파편
 #  HUD(300)        : HUD / GameOver 텍스트 등 UI
-#
-# TrackDecor.setup()에 center_asset_zindex로 20(Z_DECOR_BASE)을 넘겨주도록 수정함.
-# TrackDecor 쪽에서는 lane_idx, spawn 순서에 따라 20~40 근방의 z값을 부여하고,
-# 가장 아래 레인이 제일 위에 깔리도록, 그리고 먼저 있던 오브젝트가 더 위로 오도록 한다.
 
 extends Control
 signal finished
@@ -72,7 +68,7 @@ signal finished
 @export var center_asset_scale: float = 0.26
 @export var center_asset_gap_px: float = 240.0
 @export var center_asset_y_offset: float = 23.0
-@export var center_asset_zindex: int = -8000   # ← Z_DECOR_BASE와 맞춰서 양수 작은 값으로
+@export var center_asset_zindex: int = -8000
 
 # 레인 가이드 라인(TrackDecor로 전달)
 @export var lane_guide_thickness: int = 2
@@ -81,13 +77,13 @@ signal finished
 @export var hp_max: int = 3
 @export var gameover_wait: float = 3.0
 
-# ---------- Z Index Plan (Godot 4-safe 범위) ----------
+# ---------- Z Index Plan ----------
 const Z_BG: int = 0
 const Z_STARS: int = 10
-const Z_DECOR_BASE: int = 20      # (TrackDecor 내부에서 lane별/시간별로 20~40대 내에서 가변)
-const Z_FG_BASE: int = 100        # 플레이어/장애물 기준
-const Z_SHARDS: int = Z_FG_BASE + 50   # 150
-const Z_HUD: int = Z_FG_BASE + 200     # 300
+const Z_DECOR_BASE: int = 20
+const Z_FG_BASE: int = 100
+const Z_SHARDS: int = Z_FG_BASE + 50
+const Z_HUD: int = Z_FG_BASE + 200
 
 # 파편 프리셋(플레이어 사망용)
 const _PARTICLE_COUNT_DEATH = 24
@@ -95,12 +91,32 @@ const _PARTICLE_SIZE_DEATH = Vector2(5, 5)
 const _PARTICLE_LIFETIME_DEATH = 0.9
 const _PARTICLE_GRAVITY_DEATH = 680.0
 
+# 충돌 시 속도 유지 비율(= 0.7 이면 30% 감소)
+const HIT_SPEED_KEEP_RATIO: float = 0.7
+
+# ── Near-Miss(근접 스쳐지나감) 보너스 ──
+@export var near_miss_margin_px: float = 16.0          # 이 거리 안에서 스치면 보너스
+@export var near_miss_speed_boost_ratio: float = 1.15   # 15% 가속
+@export var near_miss_cooldown: float = 0.6             # 반복 방지 쿨다운(초)
+@export var boost_speed_cap: float = 520.0              # 보너스 적용 후 최대 속도
+
+# 변속(쉭!) 느낌 파티클(보라색) 프리셋
+@export var boost_particle_color: Color = Color(0.75, 0.4, 1.0, 1.0)
+const _PARTICLE_COUNT_SHIFT = 12
+const _PARTICLE_SIZE_SHIFT = Vector2(3, 3)
+const _PARTICLE_LIFETIME_SHIFT = 0.28
+const _PARTICLE_GRAVITY_SHIFT = 140.0
+const _PARTICLE_SPEED_MIN_SHIFT = 240.0
+const _PARTICLE_SPEED_MAX_SHIFT = 440.0
+const _PARTICLE_SPREAD_DEG_SHIFT = 22.0
+
 # 내부 상태
 var _view_size: Vector2
 var _ground_y: float = 420.0
 var _hp: int = 0
 var _is_game_over: bool = false
 var _last_player_lane: int = -1
+var _near_miss_cd_left: float = 0.0
 
 # 노드 참조
 var _bg_space: ColorRect
@@ -109,7 +125,7 @@ var _shards: Node
 var _hud: Node
 var _player_ctrl: Node
 var _obstacles_ctrl: Node
-var _decor: Node   # TrackDecor
+var _decor: Node
 
 # 레인 / 스케일
 var _lanes_y: Array = []
@@ -205,22 +221,16 @@ func _ready() -> void:
 			add_child(_decor)
 			if "setup" in _decor:
 				_decor.setup(
-					_view_size,
-					_lanes_y,
-					lane_gap,
-					lane_guide_thickness,
-					lane_guide_color,
-					center_asset_path,
-					center_asset_scale,
-					center_asset_gap_px,
-					center_asset_y_offset,
-					center_asset_zindex  # 이제 -10000 같은 큰 음수 대신 20 같은 작은 양수 전달
+					_view_size, _lanes_y, lane_gap,
+					lane_guide_thickness, lane_guide_color,
+					center_asset_path, center_asset_scale,
+					center_asset_gap_px, center_asset_y_offset,
+					center_asset_zindex
 				)
 
 	# ─ Player 레인 정보/스케일 정보 전달
 	if _player_ctrl:
 		if "set_lanes" in _player_ctrl:
-			# set_lanes(lanes_y, start_lane_idx)
 			_player_ctrl.set_lanes(_lanes_y, 1)
 		if "set_lane_scales" in _player_ctrl:
 			_player_ctrl.set_lane_scales(_lane_scales)
@@ -234,9 +244,6 @@ func _ready() -> void:
 			add_child(_obstacles_ctrl)
 
 			if "set_environment" in _obstacles_ctrl:
-				# set_environment(view_size, lanes_y, lane_scales, base_zindex)
-				# base_zindex에 Z_FG_BASE(100)을 넘겨서,
-				# 장애물/플레이어가 100대 z_index에서 정렬되도록.
 				_obstacles_ctrl.set_environment(_view_size, _lanes_y, _lane_scales, Z_FG_BASE)
 
 			if "set_spawn_config" in _obstacles_ctrl:
@@ -292,6 +299,12 @@ func _process(delta: float) -> void:
 	if _is_game_over:
 		return
 
+	# Near-miss 쿨다운 감소
+	if _near_miss_cd_left > 0.0:
+		_near_miss_cd_left -= delta
+		if _near_miss_cd_left < 0.0:
+			_near_miss_cd_left = 0.0
+
 	# 장애물 업데이트
 	if _obstacles_ctrl and "update" in _obstacles_ctrl:
 		_obstacles_ctrl.update(delta)
@@ -302,7 +315,7 @@ func _process(delta: float) -> void:
 		v = _obstacles_ctrl.get_base_speed()
 		_set_starfield_speed(v)
 
-	# 데코(레인 가이드/레일) 스크롤 업데이트
+	# 데코 스크롤
 	if _decor and "update_decor" in _decor:
 		_decor.update_decor(delta, v)
 
@@ -311,7 +324,7 @@ func _process(delta: float) -> void:
 		_player_ctrl.update_player(delta)
 		_check_player_lane_and_update_z()
 
-	# 충돌 체크
+	# 충돌/근접 스침 체크
 	_check_collision()
 
 
@@ -334,8 +347,6 @@ func _input(event: InputEvent) -> void:
 
 
 # ── z-index 규칙: 장애물은 lane*2, 플레이어는 lane*2+1 ──
-# Z_FG_BASE(100)을 기준으로 lane별로 2씩 증가시켜서
-# lane_idx가 클수록(아래 레인일수록) z_index가 커진다 = 더 앞에 옴.
 func _z_for_lane(lane_idx: int, is_player: bool) -> int:
 	var base = Z_FG_BASE + lane_idx * 2
 	if is_player:
@@ -361,7 +372,7 @@ func _check_player_lane_and_update_z() -> void:
 			_apply_player_zindex()
 
 
-# ── 충돌 및 후처리 ──
+# ── 충돌 및 근접 스쳐지나감 처리 ──
 func _check_collision() -> void:
 	if _player_ctrl == null or _obstacles_ctrl == null:
 		return
@@ -373,6 +384,7 @@ func _check_collision() -> void:
 	var p_lane: int = int(_player_ctrl.get_lane_index())
 	var p_rect: Rect2 = _player_ctrl.get_player_rect()
 
+	# 1) 실제 충돌 체크
 	var hit_idx: int = _obstacles_ctrl.get_collision_index(p_rect, p_lane)
 	if hit_idx >= 0:
 		var center = Vector2.ZERO
@@ -396,11 +408,8 @@ func _check_collision() -> void:
 		if _hud and "tint_hp_hit" in _hud:
 			_hud.tint_hp_hit()
 
-		# 속도 리셋
-		if "reset_speed_to_start" in _obstacles_ctrl:
-			_obstacles_ctrl.reset_speed_to_start()
-		if "get_base_speed" in _obstacles_ctrl:
-			_set_starfield_speed(_obstacles_ctrl.get_base_speed())
+		# 속도: 30% 감소(현재 속도의 0.7배로)
+		_apply_speed_ratio(HIT_SPEED_KEEP_RATIO)
 
 		# 사망 판정
 		if _hp <= 0:
@@ -416,6 +425,74 @@ func _check_collision() -> void:
 			)
 			add_child(t)
 			t.start()
+		return
+
+	# 2) 근접 스쳐지나감(near-miss) 체크: 실제 충돌은 아니지만 margin 안으로 접근 시
+	_try_near_miss_boost(p_rect, p_lane)
+
+
+func _try_near_miss_boost(p_rect: Rect2, p_lane: int) -> void:
+	if _near_miss_cd_left > 0.0:
+		return
+	if not ("get_collision_index" in _obstacles_ctrl):
+		return
+
+	# 플레이어 rect를 margin만큼 확장해 근접 판정
+	var m: float = max(0.0, near_miss_margin_px)
+	var expanded: Rect2 = Rect2(p_rect.position - Vector2(m, m), p_rect.size + Vector2(m * 2.0, m * 2.0))
+
+	var near_idx: int = _obstacles_ctrl.get_collision_index(expanded, p_lane)
+	if near_idx >= 0:
+		# 실제 충돌은 아니었으므로 보너스 가속
+		_apply_speed_ratio(near_miss_speed_boost_ratio, true)
+		_near_miss_cd_left = near_miss_cooldown
+
+		# ── 변속 느낌 보라색 파티클: 플레이어 "뒤쪽"으로 분사 ──
+		if _shards and "spawn_directional_shards" in _shards:
+			var emit_pos = expanded.get_center()
+			if _player_ctrl and "get_player_center" in _player_ctrl:
+				emit_pos = _player_ctrl.get_player_center() + Vector2(-8.0, 0.0)  # 살짝 뒤로
+
+			# 방향은 좌측(-X)으로, 좁은 확산각으로 분사하여 '배기'처럼 보이게
+			_shards.spawn_directional_shards(
+				emit_pos,
+				Vector2(-1, 0),                      # 뒤쪽(좌측)으로
+				_PARTICLE_COUNT_SHIFT,
+				_PARTICLE_SIZE_SHIFT,
+				_PARTICLE_LIFETIME_SHIFT,
+				_PARTICLE_GRAVITY_SHIFT,
+				boost_particle_color,                 # 보라색
+				_PARTICLE_SPEED_MIN_SHIFT,
+				_PARTICLE_SPEED_MAX_SHIFT,
+				_PARTICLE_SPREAD_DEG_SHIFT
+			)
+
+		# 연출(선택): HUD 톤 정상화로 가속 타이밍 가시화
+		if _hud and "tint_hp_normal" in _hud:
+			_hud.tint_hp_normal()
+
+
+func _apply_speed_ratio(ratio: float, clamp_to_cap: bool = false) -> void:
+	if not ("get_base_speed" in _obstacles_ctrl):
+		return
+	var cur_v: float = _obstacles_ctrl.get_base_speed()
+	var new_v: float = cur_v * ratio
+	if clamp_to_cap:
+		new_v = min(new_v, boost_speed_cap)
+
+	var applied: bool = false
+	if "set_base_speed" in _obstacles_ctrl:
+		_obstacles_ctrl.set_base_speed(new_v)
+		applied = true
+	elif "set_speed_scale" in _obstacles_ctrl and cur_v != 0.0:
+		_obstacles_ctrl.set_speed_scale(new_v / cur_v)
+		applied = true
+
+	# StarField 동기화
+	if applied:
+		_set_starfield_speed(new_v)
+	else:
+		_set_starfield_speed(new_v)
 
 
 # ── 게임오버 처리 ──
