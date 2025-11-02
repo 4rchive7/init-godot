@@ -267,7 +267,7 @@ func _calc_new_prop_zindex(lane_idx: int) -> int:
 
 	# 현재 커서값을 읽고, 한 단계 줄여둔다
 	var cursor_val: int = _lane_z_cursor[lane_idx]
-	_lane_z_cursor[lane_idx] = cursor_val + 1
+	_lane_z_cursor[lane_idx] = cursor_val
 
 	# 최종 zindex
 	# _center_asset_zindex는 전체 베이스(아주 낮은 음수일 수도 있음)
