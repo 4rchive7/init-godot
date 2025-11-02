@@ -4,17 +4,16 @@
 # ▶ 원근 스케일: [위 0.9, 가운데 1.0, 아래 1.1]
 # ▶ "라인에 정확히 도착하기 직전까지만" 스케일 보간
 # ▶ z-index 최상단 유지
-# ▶ [추가] 이 객체의 (0,0) 위치에 타원형 그림자 표시 (자식 Node2D로 원을 그리고 Y 스케일로 납작하게)
+# ▶ Near-miss 가속 시, 플레이어 뒤쪽으로 직사각형 방출 파티클: play_boost_trail(mult: float)
 
 extends Control
 
 # ───────── 내부 로컬 클래스: 타원 그림자 ─────────
 class ShadowOval:
 	extends Node2D
-	var radius: float = 20.0       # 원의 반지름(그림자 기본 크기)
+	var radius: float = 20.0
 	var color: Color = Color(0,0,0,0.35)
 	func _draw() -> void:
-		# 원을 그린 뒤, 상위에서 이 노드의 scale.y 를 낮게 주어 타원 효과
 		draw_circle(Vector2.ZERO, radius, color)
 
 # --- 라인/스케일 ---
@@ -48,6 +47,20 @@ var _lane_move_start_scale: float = 1.0
 @export var tail_color: Color = Color(0.2, 0.6, 0.9)
 @export var cockpit_color: Color = Color(0.1, 0.3, 0.6, 0.85)
 
+# --- Boost Trail(가속 파티클) 기본 설정 ---
+@export var boost_fx_amount_base: int = 40                # 입자 수 ↓
+@export var boost_fx_lifetime: float = 0.5               # 짧은 수명
+@export var boost_fx_spread_deg: float = 2.0               # 삼각형 퍼짐 억제
+@export var boost_fx_particle_min_size: float = 4.0               # 삼각형 퍼짐 억제
+@export var boost_fx_particle_max_size: float = 6.0               # 삼각형 퍼짐 억제
+@export var boost_fx_color_head: Color = Color(0.8, 0.6, 1.0, 0.95)  # 보라
+@export var boost_fx_color_tail: Color = Color(0.8, 0.6, 1.0, 0.0)   # 보라→투명
+
+# 거리 제한(최대 비행거리 px)
+const BOOST_MAX_DISTANCE_PX: float = 70.0
+@export var boost_max_velocity_multiplier: float = 2.0               # 삼각형 퍼짐 억제
+@export var boost_min_velocity_multiplier: float = 4.0               # 삼각형 퍼짐 억제
+
 # --- 내부 상태 ---
 var _ground_y: float = 0.0
 var _vel_y: float = 0.0
@@ -62,16 +75,19 @@ var _wing_l: Polygon2D
 var _wing_r: Polygon2D
 var _tail: Polygon2D
 var _canopy: Polygon2D
-var _shadow: ShadowOval   # ★ 타원 그림자
+var _shadow: ShadowOval
+
+# ── Boost Trail 노드 ──
+var _boost_fx: GPUParticles2D
 
 func _ready() -> void:
-	# 최상단 렌더링
 	z_as_relative = false
 	z_index = 4096
 	pivot_offset = _ship_size * 0.5
 	set_process(true)
 
 # GameLayer에서 호출
+# setup(ground_y, size, color, start_x)
 func setup(ground_y: float, size: Vector2, color: Color, start_x: float) -> void:
 	_clear_visuals()
 
@@ -87,8 +103,8 @@ func setup(ground_y: float, size: Vector2, color: Color, start_x: float) -> void
 	else:
 		_build_polygon_ship(size, color)
 
-	# ★ 그림자 생성/업데이트 (항상 (0,0)에 배치)
 	_ensure_shadow()
+	_ensure_boost_particles()
 
 	_base_x = start_x
 	position = Vector2(_base_x, _ground_y - _ship_size.y)
@@ -115,11 +131,10 @@ func set_lanes(lanes_y: Array, start_lane_index: int) -> void:
 		_target_scale = _current_scale
 		scale = Vector2(_current_scale, _current_scale)
 		_lane_move_active = false
-
-		# 라인이 정해졌을 때도 그림자 크기 재설정
 		_update_shadow_shape()
+		_update_boost_fx_anchor()
+		_update_boost_fx_emission_rect()
 
-# 외부에서 라인별 스케일 지정 가능
 func set_lane_scales(arr: Array) -> void:
 	if arr.size() >= 3:
 		_lane_scales = [float(arr[0]), float(arr[1]), float(arr[2])]
@@ -127,6 +142,7 @@ func set_lane_scales(arr: Array) -> void:
 		_target_scale = _current_scale
 		scale = Vector2(_current_scale, _current_scale)
 		_update_shadow_shape()
+		_update_boost_fx_emission_rect()
 
 func change_lane(delta_idx: int) -> void:
 	if _lanes.size() == 0:
@@ -138,7 +154,6 @@ func change_lane(delta_idx: int) -> void:
 	_lane_index = new_index
 	_lane_target_y = float(_lanes[_lane_index])
 
-	# ★ 라인 이동 "시작 시점" 스냅샷을 저장 → 진행률 기반 스케일 보간
 	_lane_move_active = true
 	_lane_move_start_y = position.y
 	_lane_move_total_dy = _lane_target_y - _lane_move_start_y
@@ -146,11 +161,9 @@ func change_lane(delta_idx: int) -> void:
 	_target_scale = _get_lane_scale(_lane_index)
 
 func update_player(delta: float) -> void:
-	# X 고정, 회전 없음
 	position.x = _base_x
 	rotation = 0.0
 
-	# 점프 물리
 	if _is_jumping:
 		_vel_y += gravity * delta
 		position.y += _vel_y * delta
@@ -160,7 +173,6 @@ func update_player(delta: float) -> void:
 			_vel_y = 0.0
 			_is_jumping = false
 	else:
-		# 라인 타겟으로 스무스 이동
 		var dy: float = _lane_target_y - position.y
 		if dy != 0.0:
 			var step: float = lane_snap_speed * delta
@@ -172,13 +184,15 @@ func update_player(delta: float) -> void:
 					_lane_move_active = false
 			else:
 				position.y += step * sign(dy)
-				# 진행률 기반 스케일 보간 (도착 '직전'까지만)
 				if _lane_move_active:
 					var total: float = max(abs(_lane_move_total_dy), 0.0001)
 					var progressed: float = clamp(abs(position.y - _lane_move_start_y) / total, 0.0, 1.0)
 					var s: float = lerp(_lane_move_start_scale, _target_scale, progressed)
 					_current_scale = s
 					scale = Vector2(s, s)
+
+	_update_boost_fx_anchor()
+	_update_boost_fx_emission_rect()
 
 func jump() -> void:
 	if not _is_jumping:
@@ -206,6 +220,38 @@ func set_gravity(v: float) -> void:
 func set_jump_force(v: float) -> void:
 	jump_force = v
 
+# ───────── 외부 공개 API: Near-miss 가속 이펙트 ─────────
+# GameLayer에서 근접 가속 직후 호출:
+#   if _player_ctrl and "play_boost_trail" in _player_ctrl:
+#       _player_ctrl.play_boost_trail(near_miss_speed_boost_ratio)
+func play_boost_trail(boost_multiplier: float = 1.0) -> void:
+	_ensure_boost_particles()
+	var mult: float = clamp(boost_multiplier, 0.5, 3.0)
+
+	# 입자 수는 배수에 따라 소폭 조정, 이동거리는 최대 30px 이하 보장
+	_boost_fx.amount = int(float(boost_fx_amount_base) * mult)
+	_boost_fx.lifetime = boost_fx_lifetime
+	# ❌ lifetime_randomness 는 GPUParticles2D에 없음 → randomness 사용
+	_boost_fx.randomness = 0.65
+
+	var pm: ParticleProcessMaterial = _boost_fx.process_material as ParticleProcessMaterial
+	if pm != null:
+		# 거리 캡: v * t <= 30px  → t는 고정, v 범위를 그에 맞춰 제한
+		var t: float = max(_boost_fx.lifetime, 0.02)
+		var v_cap: float = BOOST_MAX_DISTANCE_PX / t
+		# 입자 크기 2배 (가시성↑)
+		pm.scale_min = boost_fx_particle_min_size
+		pm.scale_max = boost_fx_particle_max_size
+		# 다양한 거리(서로 다른 속도), 하지만 최대 30px 근처로 제한
+		pm.initial_velocity_min = v_cap * boost_min_velocity_multiplier
+		pm.initial_velocity_max = v_cap * boost_max_velocity_multiplier
+
+	# 원샷 재생
+	_boost_fx.one_shot = true
+	_boost_fx.emitting = false
+	_boost_fx.restart()
+	_boost_fx.emitting = true
+
 # -------- 내부 구현 --------
 func _get_current_floor_y() -> float:
 	if use_lanes and _lanes.size() > 0:
@@ -219,7 +265,7 @@ func _get_lane_scale(idx: int) -> float:
 
 func _clear_visuals() -> void:
 	for c in get_children():
-		# ★ 그림자는 유지, 나머지 비주얼만 정리
+		# 그림자/파티클은 유지, 나머지 비주얼만 정리
 		if c is Sprite2D or c is Polygon2D:
 			c.queue_free()
 	_sprite = null
@@ -314,7 +360,6 @@ func _build_polygon_ship(size: Vector2, color: Color) -> void:
 	_canopy.z_index = 4096
 	add_child(_canopy)
 
-	# 폴리곤 기반에서도 그림자 반영
 	_ensure_shadow()
 
 func _apply_topmost_z_to_children() -> void:
@@ -322,28 +367,94 @@ func _apply_topmost_z_to_children() -> void:
 		if c is CanvasItem:
 			(c as CanvasItem).z_as_relative = false
 			(c as CanvasItem).z_index = 4096
-	# 그림자는 배 아래쪽으로 (살짝 낮은 z)
 	if _shadow:
 		_shadow.z_as_relative = false
 		_shadow.z_index = 4095
+	if _boost_fx:
+		_boost_fx.z_as_relative = false
+		_boost_fx.z_index = 4095
 
-# ───────── 그림자 생성/업데이트 ─────────
+# ───────── 그림자 ─────────
 func _ensure_shadow() -> void:
 	if _shadow == null:
 		_shadow = ShadowOval.new()
-		# 요구: "이 객체의 0,0 포지션에" 그림자 → 로컬 (0,0)에 배치
-		_shadow.position = Vector2(60,40)
+		_shadow.position = Vector2(60, 40)  # 로컬 좌표
 		_shadow.z_as_relative = false
-		_shadow.z_index = 4095   # 배(4096) 바로 아래
+		_shadow.z_index = 4095
 		add_child(_shadow)
 	_update_shadow_shape()
 
 func _update_shadow_shape() -> void:
 	if _shadow == null:
 		return
-	# 배 크기 기준으로 적당한 그림자 반경과 납작 비율 설정
 	var base: float = max(_ship_size.x, _ship_size.y)
 	_shadow.radius = base * 0.45
-	# 납작한 타원 효과: 이 노드 자체의 스케일로 압축
 	_shadow.scale = Vector2(1.0, 0.2)
 	_shadow.queue_redraw()
+
+# ───────── Boost Trail 파티클 ─────────
+func _ensure_boost_particles() -> void:
+	if _boost_fx != null:
+		return
+
+	_boost_fx = GPUParticles2D.new()
+	_boost_fx.emitting = false
+	_boost_fx.one_shot = true
+	_boost_fx.amount = boost_fx_amount_base
+	_boost_fx.lifetime = boost_fx_lifetime
+	_boost_fx.randomness = 0.65      # ✨ 노드 레벨 랜덤
+	_boost_fx.local_coords = true
+	_boost_fx.z_as_relative = false
+	_boost_fx.z_index = 4095
+
+	var pm: ParticleProcessMaterial = ParticleProcessMaterial.new()
+
+	# 진행 방향: 화면 왼쪽(-X)으로 분출 → 뒤쪽 트레일
+	pm.direction = Vector3(-1, 0, 0)
+	pm.spread = boost_fx_spread_deg
+	pm.gravity = Vector3(0, 0, 0)
+	pm.damping = Vector2.ZERO
+
+	# 입자 크기(2배 정도)
+	pm.scale_min = 1.2
+	pm.scale_max = 2.2
+
+	# 색상 페이드: 보라색 → 투명, Gradient → GradientTexture1D
+	var grad = Gradient.new()
+	grad.colors = PackedColorArray([boost_fx_color_head, boost_fx_color_tail])
+	grad.offsets = PackedFloat32Array([0.0, 1.0])
+	var grad_tex = GradientTexture1D.new()
+	grad_tex.gradient = grad
+	pm.color_ramp = grad_tex
+
+	# 방출 모양: 직사각형 (박스)
+	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	# 실제 크기는 아래 업데이트 함수에서 설정
+
+	_boost_fx.process_material = pm
+
+	_update_boost_fx_anchor()
+	_update_boost_fx_emission_rect()
+	add_child(_boost_fx)
+
+# 배의 뒤쪽 중앙에 파티클 위치 유지
+func _update_boost_fx_anchor() -> void:
+	if _boost_fx == null:
+		return
+	var sz: Vector2 = _ship_size * max(_current_scale, 0.0001)
+	var offset_x: float = -sz.x * 0.08
+	var offset_y: float = sz.y * 0.50
+	_boost_fx.position = Vector2(offset_x, offset_y)
+
+# 방출 시작점을 넓혀 직사각형 영역에서 분사
+func _update_boost_fx_emission_rect() -> void:
+	if _boost_fx == null:
+		return
+	var pm: ParticleProcessMaterial = _boost_fx.process_material as ParticleProcessMaterial
+	if pm == null:
+		return
+	var sz: Vector2 = _ship_size * max(_current_scale, 0.0001)
+	# 너비는 배 폭의 30%, 높이는 배 높이의 40% 정도로 넓게
+	var rect_w: float = sz.x * 0.30
+	var rect_h: float = sz.y * 0.40
+	pm.emission_box_extents = Vector3(rect_w * 0.5, rect_h * 0.5, 0.0)

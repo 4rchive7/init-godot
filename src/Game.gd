@@ -95,10 +95,14 @@ const _PARTICLE_GRAVITY_DEATH = 680.0
 const HIT_SPEED_KEEP_RATIO: float = 0.7
 
 # ── Near-Miss(근접 스쳐지나감) 보너스 ──
-@export var near_miss_margin_px: float = 16.0          # 이 거리 안에서 스치면 보너스
+@export var near_miss_margin_px: float = 100.0          # 이 거리 안에서 스치면 보너스
 @export var near_miss_speed_boost_ratio: float = 1.15   # 15% 가속
 @export var near_miss_cooldown: float = 0.6             # 반복 방지 쿨다운(초)
 @export var boost_speed_cap: float = 520.0              # 보너스 적용 후 최대 속도
+
+var _near_miss_armed: bool = false
+var _near_miss_arm_deadline: float = 0.0
+@export var near_miss_arm_window: float = 0.35 
 
 # 변속(쉭!) 느낌 파티클(보라색) 프리셋
 @export var boost_particle_color: Color = Color(0.75, 0.4, 1.0, 1.0)
@@ -324,9 +328,11 @@ func _process(delta: float) -> void:
 		_player_ctrl.update_player(delta)
 		_check_player_lane_and_update_z()
 
+	# ★ 니어미스 ‘장전’ 스캔: 회피 전, 근접 후보만 기록
+	_arm_near_miss_if_close()
+
 	# 충돌/근접 스침 체크
 	_check_collision()
-
 
 func _input(event: InputEvent) -> void:
 	if _is_game_over:
@@ -337,13 +343,17 @@ func _input(event: InputEvent) -> void:
 			if _player_ctrl and "change_lane" in _player_ctrl:
 				_player_ctrl.change_lane(-1)
 				_check_player_lane_and_update_z()
+				_try_fire_near_miss_on_evade()
 		elif event.keycode == KEY_DOWN:
 			if _player_ctrl and "change_lane" in _player_ctrl:
 				_player_ctrl.change_lane(1)
 				_check_player_lane_and_update_z()
+				_try_fire_near_miss_on_evade()
 		elif event.keycode == KEY_SPACE:
 			if _player_ctrl and "jump" in _player_ctrl:
 				_player_ctrl.jump()
+				_try_fire_near_miss_on_evade()
+
 
 
 # ── z-index 규칙: 장애물은 lane*2, 플레이어는 lane*2+1 ──
@@ -428,7 +438,7 @@ func _check_collision() -> void:
 		return
 
 	# 2) 근접 스쳐지나감(near-miss) 체크: 실제 충돌은 아니지만 margin 안으로 접근 시
-	_try_near_miss_boost(p_rect, p_lane)
+	# _try_near_miss_boost(p_rect, p_lane)
 
 
 func _try_near_miss_boost(p_rect: Rect2, p_lane: int) -> void:
@@ -446,6 +456,14 @@ func _try_near_miss_boost(p_rect: Rect2, p_lane: int) -> void:
 		# 실제 충돌은 아니었으므로 보너스 가속
 		_apply_speed_ratio(near_miss_speed_boost_ratio, true)
 		_near_miss_cd_left = near_miss_cooldown
+
+		# ★ 여기 추가: 플레이어 뒤 파티클 분출
+		if _player_ctrl and "play_boost_trail" in _player_ctrl:
+			_player_ctrl.play_boost_trail(near_miss_speed_boost_ratio)
+
+		# 연출(선택)
+		if _hud and "tint_hp_normal" in _hud:
+			_hud.tint_hp_normal()
 
 		# ── 변속 느낌 보라색 파티클: 플레이어 "뒤쪽"으로 분사 ──
 		if _shards and "spawn_directional_shards" in _shards:
@@ -548,3 +566,64 @@ func _set_full_rect(ctrl: Control) -> void:
 	ctrl.offset_top = 0
 	ctrl.offset_right = 0
 	ctrl.offset_bottom = 0
+
+func _arm_near_miss_if_close() -> void:
+	if _player_ctrl == null or _obstacles_ctrl == null:
+		return
+	if not ("get_lane_index" in _player_ctrl and "get_player_rect" in _player_ctrl):
+		return
+	if not ("get_collision_index" in _obstacles_ctrl):
+		return
+
+	# 플레이어 기준 박스 확장으로 "근접"만 감지 (충돌은 아님)
+	var p_lane: int = int(_player_ctrl.get_lane_index())
+	var p_rect: Rect2 = _player_ctrl.get_player_rect()
+
+	var m: float = max(0.0, near_miss_margin_px)
+	var expanded: Rect2 = Rect2(p_rect.position - Vector2(m, m), p_rect.size + Vector2(m * 2.0, m * 2.0))
+
+	var near_idx: int = _obstacles_ctrl.get_collision_index(expanded, p_lane)
+
+	# 근접 상태면 ‘장전’하고 유효시간 창을 연다.
+	if near_idx >= 0:
+		_near_miss_armed = true
+		_near_miss_arm_deadline = Time.get_ticks_msec() + int(near_miss_arm_window * 1000.0)
+	else:
+		# 너무 멀어지면 장전 해제(선택사항)
+		if Time.get_ticks_msec() > _near_miss_arm_deadline:
+			_near_miss_armed = false
+
+
+func _try_fire_near_miss_on_evade() -> void:
+	# 장전돼 있지 않으면 무시
+	if not _near_miss_armed:
+		return
+	# 유효시간 창 확인
+	if Time.get_ticks_msec() > _near_miss_arm_deadline:
+		_near_miss_armed = false
+		return
+	# 실제 충돌 중이면 니어미스 발동 금지
+	if _player_ctrl == null or _obstacles_ctrl == null:
+		return
+	if not ("get_lane_index" in _player_ctrl and "get_player_rect" in _player_ctrl):
+		return
+	if not ("get_collision_index" in _obstacles_ctrl):
+		return
+
+	var p_lane: int = int(_player_ctrl.get_lane_index())
+	var p_rect: Rect2 = _player_ctrl.get_player_rect()
+	var hit_now: int = _obstacles_ctrl.get_collision_index(p_rect, p_lane)
+	if hit_now >= 0:
+		_near_miss_armed = false
+		return
+
+	# ➜ 여기서 ‘니어미스 보상’ 실행 (기존 _try_near_miss_boost 에서 하던 것)
+	_apply_speed_ratio(near_miss_speed_boost_ratio, true)
+	_near_miss_cd_left = near_miss_cooldown
+
+	# 플레이어 뒤 파티클
+	if _player_ctrl and "play_boost_trail" in _player_ctrl:
+		_player_ctrl.play_boost_trail(near_miss_speed_boost_ratio)
+
+	# 1회 발동 후 해제
+	_near_miss_armed = false
