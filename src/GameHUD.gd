@@ -72,3 +72,29 @@ func _set_full_rect(ctrl: Control) -> void:
 	ctrl.offset_top = 0
 	ctrl.offset_right = 0
 	ctrl.offset_bottom = 0
+
+func set_speed(v: float) -> void:
+	if not has_node("SpeedLabel"):
+		var lbl = Label.new()
+		lbl.name = "SpeedLabel"
+
+		# 🔹 화면 아래 중앙 정렬
+		lbl.anchor_left = 0.5
+		lbl.anchor_right = 0.5
+		lbl.anchor_top = 1.0
+		lbl.anchor_bottom = 1.0
+
+		# 🔹 기준점은 화면 하단 중앙, 살짝 위로 올림
+		lbl.offset_left = -60
+		lbl.offset_top = -40
+		lbl.offset_right = 60
+		lbl.offset_bottom = -10
+
+		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+
+		lbl.modulate = Color(0.8, 0.9, 1.0)
+		lbl.add_theme_font_size_override("font_size", 24)
+		add_child(lbl)
+
+	get_node("SpeedLabel").text = "Speed: " + str(round(v * 0.1)) + " km/h"

@@ -74,7 +74,7 @@ signal finished
 @export var lane_guide_thickness: int = 2
 @export var lane_guide_color: Color = Color(0.6, 0.6, 0.75, 0.65)
 
-@export var hp_max: int = 3
+@export var hp_max: int = 10
 @export var gameover_wait: float = 3.0
 
 # ---------- Z Index Plan ----------
@@ -98,7 +98,6 @@ const HIT_SPEED_KEEP_RATIO: float = 0.7
 @export var near_miss_margin_px: float = 100.0          # 이 거리 안에서 스치면 보너스
 @export var near_miss_speed_boost_ratio: float = 1.15   # 15% 가속
 @export var near_miss_cooldown: float = 0.6             # 반복 방지 쿨다운(초)
-@export var boost_speed_cap: float = 520.0              # 보너스 적용 후 최대 속도
 
 var _near_miss_armed: bool = false
 var _near_miss_arm_deadline: float = 0.0
@@ -318,6 +317,11 @@ func _process(delta: float) -> void:
 	if _obstacles_ctrl and "get_base_speed" in _obstacles_ctrl:
 		v = _obstacles_ctrl.get_base_speed()
 		_set_starfield_speed(v)
+		
+	if _hud and "set_speed" in _hud:
+		_hud.set_speed(v)
+
+
 
 	# 데코 스크롤
 	if _decor and "update_decor" in _decor:
@@ -454,7 +458,7 @@ func _try_near_miss_boost(p_rect: Rect2, p_lane: int) -> void:
 	var near_idx: int = _obstacles_ctrl.get_collision_index(expanded, p_lane)
 	if near_idx >= 0:
 		# 실제 충돌은 아니었으므로 보너스 가속
-		_apply_speed_ratio(near_miss_speed_boost_ratio, true)
+		_apply_speed_ratio(near_miss_speed_boost_ratio)
 		_near_miss_cd_left = near_miss_cooldown
 
 		# ★ 여기 추가: 플레이어 뒤 파티클 분출
@@ -490,27 +494,29 @@ func _try_near_miss_boost(p_rect: Rect2, p_lane: int) -> void:
 			_hud.tint_hp_normal()
 
 
-func _apply_speed_ratio(ratio: float, clamp_to_cap: bool = false) -> void:
+func _apply_speed_ratio(ratio: float) -> void:
 	if not ("get_base_speed" in _obstacles_ctrl):
 		return
-	var cur_v: float = _obstacles_ctrl.get_base_speed()
-	var new_v: float = cur_v * ratio
-	if clamp_to_cap:
-		new_v = min(new_v, boost_speed_cap)
+	var cur_v = _obstacles_ctrl.get_base_speed()
+	var new_v = cur_v * ratio
 
-	var applied: bool = false
-	if "set_base_speed" in _obstacles_ctrl:
-		_obstacles_ctrl.set_base_speed(new_v)
-		applied = true
-	elif "set_speed_scale" in _obstacles_ctrl and cur_v != 0.0:
-		_obstacles_ctrl.set_speed_scale(new_v / cur_v)
-		applied = true
+	# (선택) 정상 상한을 알아와서, '부스트 결과가 상한을 넘기는지'도 함께 체크
+	var cap = 0.0
+	if "get_normal_cap_pxps" in _obstacles_ctrl:
+		cap = _obstacles_ctrl.get_normal_cap_pxps()
 
-	# StarField 동기화
-	if applied:
-		_set_starfield_speed(new_v)
-	else:
-		_set_starfield_speed(new_v)
+	# 먼저 속도 반영
+	_obstacles_ctrl.set_base_speed(new_v)
+
+	# 🔹 조건부 오버캡: ① 지금이 이미 정상 상한이었거나, ② 부스트 결과 상한을 넘어섰을 때만
+	var need_overcap: bool = false
+	if "is_at_normal_cap" in _obstacles_ctrl and _obstacles_ctrl.is_at_normal_cap():
+		need_overcap = true
+	elif cap > 0.0 and new_v > cap:
+		need_overcap = true
+
+	if need_overcap and "start_overcap" in _obstacles_ctrl:
+		_obstacles_ctrl.start_overcap(1.2)   # 0.5초만 +10km/h 허용
 
 
 # ── 게임오버 처리 ──
@@ -618,7 +624,7 @@ func _try_fire_near_miss_on_evade() -> void:
 		return
 
 	# ➜ 여기서 ‘니어미스 보상’ 실행 (기존 _try_near_miss_boost 에서 하던 것)
-	_apply_speed_ratio(near_miss_speed_boost_ratio, true)
+	_apply_speed_ratio(near_miss_speed_boost_ratio)
 	_near_miss_cd_left = near_miss_cooldown
 
 	# 플레이어 뒤 파티클

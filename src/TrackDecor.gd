@@ -206,7 +206,7 @@ func _spawn_center_prop_lane(spawn_x: float, lane_idx: int) -> Dictionary:
 		tr.texture = tex
 		tr.stretch_mode = TextureRect.STRETCH_KEEP
 		tr.set_anchors_preset(Control.PRESET_TOP_LEFT)
-		tr.position = Vector2(spawn_x, y)
+		tr.position = Vector2(spawn_x, y-20)
 		tr.scale = Vector2(_center_asset_scale, _center_asset_scale)
 		tr.z_as_relative = false
 		tr.z_index = zindex_val
@@ -273,7 +273,6 @@ func _calc_new_prop_zindex(lane_idx: int) -> int:
 	# _center_asset_zindex는 전체 베이스(아주 낮은 음수일 수도 있음)
 	# lane_depth_base로 레인 간 차등
 	# cursor_val로 "예전 애일수록 앞" 보장
-	print(lane_idx, " ", _center_asset_zindex + lane_depth_base + cursor_val, " ", _center_asset_zindex," ",lane_depth_base, " ", cursor_val)
 	return _center_asset_zindex + lane_depth_base + cursor_val
 
 
