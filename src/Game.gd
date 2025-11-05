@@ -461,9 +461,9 @@ func _try_near_miss_boost(p_rect: Rect2, p_lane: int) -> void:
 		_apply_speed_ratio(near_miss_speed_boost_ratio)
 		_near_miss_cd_left = near_miss_cooldown
 
-		# ★ 여기 추가: 플레이어 뒤 파티클 분출
-		if _player_ctrl and "play_boost_trail" in _player_ctrl:
-			_player_ctrl.play_boost_trail(near_miss_speed_boost_ratio)
+		# # ★ 여기 추가: 플레이어 뒤 파티클 분출
+		# if _player_ctrl and "play_boost_trail" in _player_ctrl:
+		# 	_player_ctrl.play_boost_trail(near_miss_speed_boost_ratio)
 
 		# 연출(선택)
 		if _hud and "tint_hp_normal" in _hud:
@@ -628,8 +628,8 @@ func _try_fire_near_miss_on_evade() -> void:
 	_near_miss_cd_left = near_miss_cooldown
 
 	# 플레이어 뒤 파티클
-	if _player_ctrl and "play_boost_trail" in _player_ctrl:
-		_player_ctrl.play_boost_trail(near_miss_speed_boost_ratio)
+	if _player_ctrl and "trigger_near_miss_fx" in _player_ctrl:
+		_player_ctrl.trigger_near_miss_fx()
 
 	# 1회 발동 후 해제
 	_near_miss_armed = false

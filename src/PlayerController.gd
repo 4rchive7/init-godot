@@ -4,7 +4,8 @@
 # ▶ 원근 스케일: [위 0.9, 가운데 1.0, 아래 1.1]
 # ▶ "라인에 정확히 도착하기 직전까지만" 스케일 보간
 # ▶ z-index 최상단 유지
-# ▶ (요청 반영) 점프 시작~착지까지 레인 변경 불가
+# ▶ 점프 중 레인 변경 불가
+# ▶ 니얼 미스: 왼쪽(뒤)으로 짧게 네모 파티클 버스트
 
 extends Control
 
@@ -63,6 +64,11 @@ var _tail: Polygon2D
 var _canopy: Polygon2D
 var _shadow: ShadowOval
 
+# --- 니얼 미스 FX ---
+var _near_fx: GPUParticles2D
+var _near_fx_mat: ParticleProcessMaterial
+var _near_fx_tex: Texture2D
+
 func _ready() -> void:
 	z_as_relative = false
 	z_index = 4096
@@ -86,6 +92,7 @@ func setup(ground_y: float, size: Vector2, color: Color, start_x: float) -> void
 		_build_polygon_ship(size, color)
 
 	_ensure_shadow()
+	_ensure_near_miss_fx()
 
 	_base_x = start_x
 	position = Vector2(_base_x, _ground_y - _ship_size.y)
@@ -125,19 +132,13 @@ func set_lane_scales(arr: Array) -> void:
 func change_lane(delta_idx: int) -> void:
 	if _lanes.size() == 0:
 		return
-
-	# ✅ 요청 반영: 점프 중에는 레인 변경 불가
 	if _is_jumping:
 		return
-
 	var new_index: int = clamp(_lane_index + delta_idx, 0, _lanes.size() - 1)
 	if new_index == _lane_index:
 		return
-
 	_lane_index = new_index
 	_lane_target_y = float(_lanes[_lane_index])
-
-	# 지상에서만 스케일 보간
 	_lane_move_active = true
 	_lane_move_start_y = position.y
 	_lane_move_total_dy = _lane_target_y - _lane_move_start_y
@@ -147,7 +148,6 @@ func change_lane(delta_idx: int) -> void:
 func update_player(delta: float) -> void:
 	position.x = _base_x
 	rotation = 0.0
-
 	if _is_jumping:
 		_vel_y += gravity * delta
 		position.y += _vel_y * delta
@@ -156,8 +156,6 @@ func update_player(delta: float) -> void:
 			position.y = floor_y
 			_vel_y = 0.0
 			_is_jumping = false
-
-			# 착지 순간, 현재 레인 스케일 확정
 			_current_scale = _get_lane_scale(_lane_index)
 			scale = Vector2(_current_scale, _current_scale)
 			_lane_move_active = false
@@ -207,6 +205,13 @@ func set_gravity(v: float) -> void:
 func set_jump_force(v: float) -> void:
 	jump_force = v
 
+# ───────── 니얼 미스: 외부에서 호출 ─────────
+func trigger_near_miss_fx() -> void:
+	_ensure_near_miss_fx()
+	# 기체 중심 기준으로 위치 보정
+	# _near_fx.position = get_player_center() - position + Vector2(-20, 0)
+	_near_fx.restart()
+
 # -------- 내부 구현 --------
 func _get_current_floor_y() -> float:
 	if use_lanes and _lanes.size() > 0:
@@ -245,7 +250,6 @@ func _build_sprite(tex: Texture2D) -> void:
 func _build_polygon_ship(size: Vector2, color: Color) -> void:
 	_ship_size = size
 	body_color = color
-
 	var w: float = _ship_size.x
 	var h: float = _ship_size.y
 	var cx: float = w * 0.5
@@ -324,6 +328,9 @@ func _apply_topmost_z_to_children() -> void:
 	if _shadow:
 		_shadow.z_as_relative = false
 		_shadow.z_index = 4095
+	if _near_fx:
+		_near_fx.z_as_relative = false
+		_near_fx.z_index = 4096
 
 # ───────── 그림자 ─────────
 func _ensure_shadow() -> void:
@@ -342,3 +349,55 @@ func _update_shadow_shape() -> void:
 	_shadow.radius = base * 0.45
 	_shadow.scale = Vector2(1.0, 0.2)
 	_shadow.queue_redraw()
+
+# ▶ 파티클 시작 오프셋(플레이어 기준)
+@export var near_fx_offset: Vector2 = Vector2(-10, 25)
+
+# ───────── 니얼 미스 FX 생성 ─────────
+func _ensure_near_miss_fx() -> void:
+	if _near_fx != null:
+		_near_fx.queue_free()
+		_near_fx = null
+
+	var img := Image.create(16, 6, false, Image.FORMAT_RGBA8)
+	img.fill(Color(1, 1, 1, 1))
+	_near_fx_tex = ImageTexture.create_from_image(img)
+
+	_near_fx = GPUParticles2D.new()
+	_near_fx.one_shot = true
+	_near_fx.lifetime = 0.3
+	_near_fx.amount = 40
+	_near_fx.explosiveness = 0.05
+	_near_fx.local_coords = true
+	_near_fx.texture = _near_fx_tex
+	_near_fx.z_as_relative = false
+	_near_fx.z_index = 4096
+
+	# ✅ 시작 지점은 여기 한 곳에서만 설정
+	_near_fx.position = near_fx_offset
+
+	var mat := ParticleProcessMaterial.new()
+	mat.direction = Vector3(-1, 0, 0)
+	mat.spread = 0.0
+	mat.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	mat.emission_box_extents = Vector3(18.0, 6.0, 0.0)
+	mat.initial_velocity_min = 200.0
+	mat.initial_velocity_max = 400.0
+	mat.linear_accel = Vector2(-800.0,0.0)
+	mat.lifetime_randomness = 0.6
+	mat.scale_min = 0.2
+	mat.scale_max = 2.3
+	mat.gravity = Vector3(0, 0, 0)
+
+	var ramp := Gradient.new()
+	ramp.colors = PackedColorArray([
+		Color(0.9, 0.5, 1.0, 1.0),
+		Color(0.7, 0.3, 1.0, 0.6),
+		Color(0.5, 0.2, 1.0, 0.0)
+	])
+	var ramp_tex := GradientTexture1D.new()
+	ramp_tex.gradient = ramp
+	mat.color_ramp = ramp_tex
+
+	_near_fx.process_material = mat
+	add_child(_near_fx)
