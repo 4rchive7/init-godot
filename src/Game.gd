@@ -74,8 +74,12 @@ signal finished
 @export var lane_guide_thickness: int = 2
 @export var lane_guide_color: Color = Color(0.6, 0.6, 0.75, 0.65)
 
-@export var hp_max: int = 10
+@export var hp_max: int = 3
 @export var gameover_wait: float = 3.0
+
+# ---------- ★추가: 이동거리/진행도 표시용 ----------
+@export var meters_per_pixel: float = 0.02    # 픽셀→미터 변환비
+@export var level_total_meters: float = 2000.0 # 이 스테이지 총 거리(미터)
 
 # ---------- Z Index Plan ----------
 const Z_BG: int = 0
@@ -95,9 +99,9 @@ const _PARTICLE_GRAVITY_DEATH = 680.0
 const HIT_SPEED_KEEP_RATIO: float = 0.7
 
 # ── Near-Miss(근접 스쳐지나감) 보너스 ──
-@export var near_miss_margin_px: float = 100.0          # 이 거리 안에서 스치면 보너스
-@export var near_miss_speed_boost_ratio: float = 1.15   # 15% 가속
-@export var near_miss_cooldown: float = 0.6             # 반복 방지 쿨다운(초)
+@export var near_miss_margin_px: float = 100.0
+@export var near_miss_speed_boost_ratio: float = 1.15
+@export var near_miss_cooldown: float = 0.6
 
 var _near_miss_armed: bool = false
 var _near_miss_arm_deadline: float = 0.0
@@ -120,6 +124,9 @@ var _hp: int = 0
 var _is_game_over: bool = false
 var _last_player_lane: int = -1
 var _near_miss_cd_left: float = 0.0
+
+# ---------- ★추가: 누적 이동거리 ----------
+var _total_distance_m: float = 0.0
 
 # 노드 참조
 var _bg_space: ColorRect
@@ -144,6 +151,7 @@ func _ready() -> void:
 	_hp = hp_max
 	_view_size = get_viewport_rect().size
 	_ground_y = max(160.0, _view_size.y * 0.75)
+	_total_distance_m = 0.0  # ★초기화
 
 	# ─ 배경 Space ColorRect
 	_bg_space = ColorRect.new()
@@ -212,6 +220,11 @@ func _ready() -> void:
 				_hud.set_hp(_hp, hp_max)
 			if "set_hint" in _hud:
 				_hud.set_hint("↑/↓ 레인 이동, Space 점프")
+			# ★ 시작값 표시
+			if "set_distance" in _hud:
+				_hud.set_distance(0.0)
+			if "set_progress_ratio" in _hud:
+				_hud.set_progress_ratio(0.0)
 
 	# ─ 레인 계산
 	_make_lanes()
@@ -321,7 +334,20 @@ func _process(delta: float) -> void:
 	if _hud and "set_speed" in _hud:
 		_hud.set_speed(v)
 
+	# ---------- ★추가: 이동거리/진행도 갱신 ----------
+	if _hud:
+		# v(px/s) → m/s 변환 후 적분
+		var delta_m: float = v * delta * meters_per_pixel
+		_total_distance_m += delta_m
+		if _total_distance_m < 0.0:
+			_total_distance_m = 0.0
 
+		if "set_distance" in _hud:
+			_hud.set_distance(_total_distance_m)
+
+		if "set_progress_ratio" in _hud and level_total_meters > 0.0:
+			var ratio: float = clamp(_total_distance_m / level_total_meters, 0.0, 1.0)
+			_hud.set_progress_ratio(ratio)
 
 	# 데코 스크롤
 	if _decor and "update_decor" in _decor:
@@ -332,7 +358,7 @@ func _process(delta: float) -> void:
 		_player_ctrl.update_player(delta)
 		_check_player_lane_and_update_z()
 
-	# ★ 니어미스 ‘장전’ 스캔: 회피 전, 근접 후보만 기록
+	# ★ 니어미스 ‘장전’ 스캔
 	_arm_near_miss_if_close()
 
 	# 충돌/근접 스침 체크
@@ -340,7 +366,12 @@ func _process(delta: float) -> void:
 
 func _input(event: InputEvent) -> void:
 	if _is_game_over:
+		# 🎯 게임 오버 상태에서 아무 입력이 들어오면 즉시 메인 메뉴로 이동
+		if event.is_pressed():
+			emit_signal("finished")
+			_hud.set_hint("Press any key to return to menu")
 		return
+
 
 	if event is InputEventKey and event.pressed:
 		if event.keycode == KEY_UP:
@@ -441,7 +472,7 @@ func _check_collision() -> void:
 			t.start()
 		return
 
-	# 2) 근접 스쳐지나감(near-miss) 체크: 실제 충돌은 아니지만 margin 안으로 접근 시
+	# 2) 근접 스쳐지나감 체크
 	# _try_near_miss_boost(p_rect, p_lane)
 
 
@@ -457,39 +488,30 @@ func _try_near_miss_boost(p_rect: Rect2, p_lane: int) -> void:
 
 	var near_idx: int = _obstacles_ctrl.get_collision_index(expanded, p_lane)
 	if near_idx >= 0:
-		# 실제 충돌은 아니었으므로 보너스 가속
 		_apply_speed_ratio(near_miss_speed_boost_ratio)
 		_near_miss_cd_left = near_miss_cooldown
 
-		# # ★ 여기 추가: 플레이어 뒤 파티클 분출
-		# if _player_ctrl and "play_boost_trail" in _player_ctrl:
-		# 	_player_ctrl.play_boost_trail(near_miss_speed_boost_ratio)
-
-		# 연출(선택)
 		if _hud and "tint_hp_normal" in _hud:
 			_hud.tint_hp_normal()
 
-		# ── 변속 느낌 보라색 파티클: 플레이어 "뒤쪽"으로 분사 ──
 		if _shards and "spawn_directional_shards" in _shards:
 			var emit_pos = expanded.get_center()
 			if _player_ctrl and "get_player_center" in _player_ctrl:
-				emit_pos = _player_ctrl.get_player_center() + Vector2(-8.0, 0.0)  # 살짝 뒤로
+				emit_pos = _player_ctrl.get_player_center() + Vector2(-8.0, 0.0)
 
-			# 방향은 좌측(-X)으로, 좁은 확산각으로 분사하여 '배기'처럼 보이게
 			_shards.spawn_directional_shards(
 				emit_pos,
-				Vector2(-1, 0),                      # 뒤쪽(좌측)으로
+				Vector2(-1, 0),
 				_PARTICLE_COUNT_SHIFT,
 				_PARTICLE_SIZE_SHIFT,
 				_PARTICLE_LIFETIME_SHIFT,
 				_PARTICLE_GRAVITY_SHIFT,
-				boost_particle_color,                 # 보라색
+				boost_particle_color,
 				_PARTICLE_SPEED_MIN_SHIFT,
 				_PARTICLE_SPEED_MAX_SHIFT,
 				_PARTICLE_SPREAD_DEG_SHIFT
 			)
 
-		# 연출(선택): HUD 톤 정상화로 가속 타이밍 가시화
 		if _hud and "tint_hp_normal" in _hud:
 			_hud.tint_hp_normal()
 
@@ -500,15 +522,12 @@ func _apply_speed_ratio(ratio: float) -> void:
 	var cur_v = _obstacles_ctrl.get_base_speed()
 	var new_v = cur_v * ratio
 
-	# (선택) 정상 상한을 알아와서, '부스트 결과가 상한을 넘기는지'도 함께 체크
 	var cap = 0.0
 	if "get_normal_cap_pxps" in _obstacles_ctrl:
 		cap = _obstacles_ctrl.get_normal_cap_pxps()
 
-	# 먼저 속도 반영
 	_obstacles_ctrl.set_base_speed(new_v)
 
-	# 🔹 조건부 오버캡: ① 지금이 이미 정상 상한이었거나, ② 부스트 결과 상한을 넘어섰을 때만
 	var need_overcap: bool = false
 	if "is_at_normal_cap" in _obstacles_ctrl and _obstacles_ctrl.is_at_normal_cap():
 		need_overcap = true
@@ -516,10 +535,8 @@ func _apply_speed_ratio(ratio: float) -> void:
 		need_overcap = true
 
 	if need_overcap and "start_overcap" in _obstacles_ctrl:
-		_obstacles_ctrl.start_overcap(1.2)   # 0.5초만 +10km/h 허용
+		_obstacles_ctrl.start_overcap(1.2)
 
-
-# ── 게임오버 처리 ──
 func _trigger_game_over() -> void:
 	_is_game_over = true
 	_set_starfield_speed(0.0)
@@ -542,14 +559,14 @@ func _trigger_game_over() -> void:
 	if _player_ctrl:
 		_player_ctrl.queue_free()
 
-	# HUD 게임오버 텍스트
+	# HUD 게임오버 텍스트 및 결과 표시
 	if _hud and "show_game_over" in _hud:
 		_hud.show_game_over()
 	if _hud and "set_hint" in _hud:
-		_hud.set_hint(str(int(gameover_wait)) + "초 뒤 메인으로...")
+		_hud.set_hint("아무 키나 누르면 메인 메뉴로 이동")
 
-	# 타이머 시작
-	_gameover_delay_timer.start()
+	# ⛔ 더 이상 자동 타이머 대기 없음
+	_gameover_delay_timer.stop()
 
 
 func _on_gameover_delay_done() -> void:
@@ -581,7 +598,6 @@ func _arm_near_miss_if_close() -> void:
 	if not ("get_collision_index" in _obstacles_ctrl):
 		return
 
-	# 플레이어 기준 박스 확장으로 "근접"만 감지 (충돌은 아님)
 	var p_lane: int = int(_player_ctrl.get_lane_index())
 	var p_rect: Rect2 = _player_ctrl.get_player_rect()
 
@@ -590,25 +606,20 @@ func _arm_near_miss_if_close() -> void:
 
 	var near_idx: int = _obstacles_ctrl.get_collision_index(expanded, p_lane)
 
-	# 근접 상태면 ‘장전’하고 유효시간 창을 연다.
 	if near_idx >= 0:
 		_near_miss_armed = true
 		_near_miss_arm_deadline = Time.get_ticks_msec() + int(near_miss_arm_window * 1000.0)
 	else:
-		# 너무 멀어지면 장전 해제(선택사항)
 		if Time.get_ticks_msec() > _near_miss_arm_deadline:
 			_near_miss_armed = false
 
 
 func _try_fire_near_miss_on_evade() -> void:
-	# 장전돼 있지 않으면 무시
 	if not _near_miss_armed:
 		return
-	# 유효시간 창 확인
 	if Time.get_ticks_msec() > _near_miss_arm_deadline:
 		_near_miss_armed = false
 		return
-	# 실제 충돌 중이면 니어미스 발동 금지
 	if _player_ctrl == null or _obstacles_ctrl == null:
 		return
 	if not ("get_lane_index" in _player_ctrl and "get_player_rect" in _player_ctrl):
@@ -623,13 +634,10 @@ func _try_fire_near_miss_on_evade() -> void:
 		_near_miss_armed = false
 		return
 
-	# ➜ 여기서 ‘니어미스 보상’ 실행 (기존 _try_near_miss_boost 에서 하던 것)
 	_apply_speed_ratio(near_miss_speed_boost_ratio)
 	_near_miss_cd_left = near_miss_cooldown
 
-	# 플레이어 뒤 파티클
 	if _player_ctrl and "trigger_near_miss_fx" in _player_ctrl:
 		_player_ctrl.trigger_near_miss_fx()
 
-	# 1회 발동 후 해제
 	_near_miss_armed = false

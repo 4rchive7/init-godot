@@ -150,34 +150,41 @@ func _scroll_center_props_lane(delta: float, speed_px: float, lane_idx: int) -> 
 
 	_center_props_per_lane[lane_idx] = lane_list
 
-
-# 필요하면 lane_idx 레인에 새 장식 오브젝트를 오른쪽 끝에 스폰
 func _spawn_center_prop_if_needed_lane(lane_idx: int) -> void:
 	var lane_list: Array = _center_props_per_lane[lane_idx]
 
-	# 현재 레인에 가장 오른쪽 노드의 x 찾기
+	# 0) 처음엔 '연장 채움': 화면 좌(-80) ~ 우(+80)까지 한 번에 깔기
+	if lane_list.size() == 0:
+		var step: float = _center_asset_gap_px
+		if _center_asset_res is Texture2D:
+			var tex: Texture2D = _center_asset_res
+			step = max(32.0, tex.get_size().x * _center_asset_scale)
+		elif _center_asset_res is PackedScene:
+			step = max(32.0, _center_asset_gap_px)
+		else:
+			step = max(32.0, 128.0 * _center_asset_scale)
+
+		var left_edge: float = -80.0
+		var right_edge: float = _view_size.x + 80.0
+		var x: float = left_edge
+		while x <= right_edge:
+			var entry0: Dictionary = _spawn_center_prop_lane(x, lane_idx)
+			if entry0.size() > 0:
+				lane_list.append(entry0)
+			x += step
+
+		_center_props_per_lane[lane_idx] = lane_list
+		return
+
+	# 1) 이후에는 기존처럼 오른쪽 끝에서만 스폰
 	var rightmost_x: float = -1e9
 	for entry in lane_list:
 		var n: CanvasItem = entry["node"]
 		if is_instance_valid(n) and n.position.x > rightmost_x:
 			rightmost_x = n.position.x
 
-	# 기본 스폰 x 지점
 	var spawn_edge: float = _view_size.x + 80.0
 
-	# 아무것도 없으면 한 번은 박아준다 (게임 시작 시 허전하지 않게)
-	if rightmost_x <= -1e8:
-		var first_x: float = spawn_edge
-		if lane_list.size() == 0 and _center_asset_res == null:
-			# fallback 박스만 있는 경우는 화면 중간에도 하나 두자
-			first_x = _view_size.x * 0.5
-		var first_entry: Dictionary = _spawn_center_prop_lane(first_x, lane_idx)
-		if first_entry.size() > 0:
-			lane_list.append(first_entry)
-		_center_props_per_lane[lane_idx] = lane_list
-		return
-
-	# 간격 체크 후 새로 생성
 	if (spawn_edge - rightmost_x) >= _center_asset_gap_px:
 		var new_entry: Dictionary = _spawn_center_prop_lane(spawn_edge, lane_idx)
 		if new_entry.size() > 0:

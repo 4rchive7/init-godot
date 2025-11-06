@@ -336,7 +336,7 @@ func _apply_topmost_z_to_children() -> void:
 func _ensure_shadow() -> void:
 	if _shadow == null:
 		_shadow = ShadowOval.new()
-		_shadow.position = Vector2(60, 40)
+		_shadow.position = Vector2(60, 60)
 		_shadow.z_as_relative = false
 		_shadow.z_index = 4095
 		add_child(_shadow)
